@@ -1,227 +1,226 @@
-# STM32 Synchronous Buck-Boost Converter
+# Digital Synchronous Buck-Boost Converter
 
-A digital synchronous Buck-Boost DC-DC converter based on **STM32F103**, designed for high efficiency and programmable CC/CV operation.
+High-efficiency four-switch synchronous Buck-Boost converter based on **STM32F103**, featuring digital CC/CV control, TFT user interface, rotary encoder adjustment, and shunt resistor current sensing with differential amplifier.
 
 ---
 
-## Features
+# Features
 
 * Four-switch synchronous Buck-Boost topology
-* STM32F103 MCU control
-* MOSFET gate driver using **IR2101S**
-* Power MOSFETs: **IRF3205**
+* Digital control using STM32F103
+* Gate drivers based on IR2101S
+* Power MOSFETs using IRF3205
 * Constant Voltage (CV) mode
 * Constant Current (CC) mode
-* TFT SPI display user interface
-* Rotary encoder parameter adjustment
-* Current sensing using shunt resistor
-* Differential amplifier current measurement circuit
-* ADC + DMA sampling
 * Center-aligned PWM
-* Deadtime protection
-* Soft-start
+* Programmable deadtime
+* Soft-start function
+* SPI TFT display interface
+* Rotary encoder parameter adjustment
+* Output current measurement using shunt resistor
+* Differential amplifier current sensing circuit
+* ADC + DMA acquisition
 * Over-current protection (OCP)
 * Over-voltage protection (OVP)
 
 ---
 
-## Hardware Architecture
+# Hardware
 
-```
-                +----------------+
-                |   STM32F103    |
-                +----------------+
-                    |        |
-               PWM1 |        | PWM2
-                    |        |
-              +-----+--------+-----+
-              |     IR2101S Drivers |
-              +-----+--------+-----+
-                    |        |
-               +----+--------+----+
-               | 4x IRF3205 MOSFET |
-               +----+--------+----+
-                    |        |
-                    +---47uH-+
-                           |
-                         VOUT
+## Microcontroller
 
+* STM32F103C8T6
+
+## Gate Driver
+
+* 2 × IR2101S half-bridge drivers
+
+## Power MOSFET
+
+* 4 × IRF3205
+
+## Inductor
+
+* High-current power inductor
+
+## User Interface
+
+* SPI TFT display
+* Rotary encoder
+
+## Current Sensing
+
+* Low-value shunt resistor
+* Differential amplifier
+* RC low-pass filter
+* STM32 ADC
+
+---
+
+# System Architecture
+
+```text
+                    +----------------+
+                    |   STM32F103    |
+                    +----------------+
+                     |             |
+                PWM1 |             | PWM2
+                     |             |
+             +-------+-------------+-------+
+             |         IR2101S Drivers      |
+             +-------+-------------+-------+
+                     |             |
+                +----+-------------+----+
+                |      4 × IRF3205       |
+                +----+-------------+----+
+                     |             |
+                     +---- L ----+-+
+                                 |
+                               VOUT
+                                 |
+                             Shunt Resistor
+                                 |
+                       Differential Amplifier
+                                 |
+                         RC Low-pass Filter
+                                 |
+                              ADC DMA
 ```
 
 ---
 
-## Specifications
+# Current Measurement
 
-| Parameter         | Value                              |
-| ----------------- | ---------------------------------- |
-| Topology          | Four-switch synchronous Buck-Boost |
-| Controller        | STM32F103                          |
-| Gate Driver       | IR2101S                            |
-| MOSFET            | IRF3205                            |
-| Current Sense     | Shunt resistor                     |
-| Current Amplifier | Differential amplifier             |
-| User Interface    | TFT SPI + Rotary Encoder           |
-| Control Method    | Digital CC/CV                      |
-| PWM Mode          | Center-aligned                     |
-| Protection        | OCP, OVP, Soft-start               |
+Output current is measured through a low-value shunt resistor.
 
----
-
-## Current Measurement
-
-Output current is measured using a low-value shunt resistor.
-
-```
+```text
 Iout
  ↓
 Rshunt
  ↓
 Differential Amplifier
  ↓
-RC Low-pass Filter
+RC Filter
  ↓
-ADC (STM32)
+ADC
 ```
 
-### Differential amplifier
-
-```
-         R1              R2
-V+ ----/\/\/\-----+----/\/\/\-----+
-                  |               |
-                  |             Vout
-                  |               |
-V- ----/\/\/\-----+----/\/\/\-----+
-         R1              R2
-```
-
-Gain:
-
-```
-Gain = R2 / R1
-```
-
-The amplified signal is filtered before entering the ADC.
+The differential amplifier converts the small shunt voltage into a suitable level for the STM32 ADC.
 
 ---
 
-## User Interface
+# Control Structure
 
-### TFT SPI Display
+## Voltage Loop
 
-Display:
+```text
+Vref
+ ↓
+Voltage PI Controller
+ ↓
+Current Reference
+```
+
+## Current Loop
+
+```text
+Current Reference
+ ↓
+Current PI Controller
+ ↓
+PWM Duty Cycle
+```
+
+This dual-loop structure provides:
+
+* Constant Voltage (CV) regulation
+* Constant Current (CC) limiting
+* Smooth transition between CC and CV modes
+
+---
+
+# User Interface
+
+## TFT SPI Display
+
+Display information:
 
 * Input voltage
 * Output voltage
 * Output current
 * Output power
-* Operating mode (CC/CV)
 * Duty cycle
+* Operating mode (CC/CV)
 
-### Rotary Encoder
+## Rotary Encoder
 
 Adjustable parameters:
 
-* Output voltage
+* Output voltage setpoint
 * Current limit
 * Menu navigation
 
 ---
 
-## Control Structure
-
-### Voltage Loop
-
-```
-Vref
- ↓
-PI Controller
- ↓
-Iref
-```
-
-### Current Loop
-
-```
-Iref
- ↓
-PI Controller
- ↓
-PWM Duty
-```
-
----
-
-## Operating Modes
-
-### CV Mode
-
-Maintain constant output voltage.
-
-```
-Iout < I_limit
-```
-
-### CC Mode
-
-Limit output current.
-
-```
-Iout ≥ I_limit
-```
-
----
-
-## Protections
+# Protection Functions
 
 * Over Current Protection (OCP)
 * Over Voltage Protection (OVP)
+* Shoot-through prevention
 * Soft-start
 * Deadtime insertion
-* Shoot-through prevention
 
 ---
 
-## Project Structure
+# Firmware Structure
 
-```
-Core/
-├── Inc/
-│   ├── buck_boost.h
-│   ├── control.h
-│   ├── adc_dma.h
-│   ├── encoder.h
-│   ├── display.h
-│   └── protection.h
-│
-├── Src/
-│   ├── main.c
-│   ├── buck_boost.c
-│   ├── control.c
-│   ├── adc_dma.c
-│   ├── encoder.c
-│   ├── display.c
-│   └── protection.c
-│
-└── Drivers/
+```text
+Core
+├── main.c
+├── pwm.c
+├── adc_dma.c
+├── current_sense.c
+├── voltage_sense.c
+├── control_pi.c
+├── buck_boost.c
+├── encoder.c
+├── display_tft.c
+├── protection.c
+└── ui.c
 ```
 
 ---
 
-## Future Improvements
+# Main Components
+
+| Component         | Description            |
+| ----------------- | ---------------------- |
+| MCU               | STM32F103              |
+| Gate Driver       | IR2101S                |
+| MOSFET            | IRF3205                |
+| Current Sensor    | Shunt Resistor         |
+| Current Amplifier | Differential Amplifier |
+| Display           | SPI TFT                |
+| User Input        | Rotary Encoder         |
+| Control Method    | Digital CC/CV          |
+| PWM Mode          | Center-aligned PWM     |
+
+---
+
+# Future Improvements
 
 * STM32G431 migration
-* HRTIM support
 * Average Current Mode Control
-* USB-C PD support
+* Adaptive deadtime
+* USB communication
+* UART monitoring
 * Data logging
-* UART/USB monitoring
 * PC software interface
 
 ---
 
-## Author
+## Project Name
 
-Digital Synchronous Buck-Boost Converter Project
+**STM32 Digital Synchronous Buck-Boost Converter**
 
-STM32F103 + IR2101S + IRF3205
+**STM32F103 + IR2101S + IRF3205 + CC/CV Control**

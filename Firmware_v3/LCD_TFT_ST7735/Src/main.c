@@ -53,6 +53,7 @@ DMA_HandleTypeDef hdma_spi1_tx;
 
 TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim2;
+TIM_HandleTypeDef htim3;
 
 /* USER CODE BEGIN PV */
 
@@ -67,6 +68,7 @@ static void MX_ADC1_Init(void);
 static void MX_ADC2_Init(void);
 static void MX_TIM1_Init(void);
 static void MX_TIM2_Init(void);
+static void MX_TIM3_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -79,8 +81,6 @@ static void MX_TIM2_Init(void);
 #define VIN_DIV_GAIN        11.0f
 #define VOUT_DIV_GAIN       11.0f
 
-
-
 #define NTC_R_PULLUP        10000.0f
 #define NTC_R0              3000.0f
 #define NTC_BETA            3950.0f
@@ -92,9 +92,41 @@ static void MX_TIM2_Init(void);
 
 #define ENC_COUNT_PER_STEP  4
 
-#define BUCK_DUTY_MIN       0.02f
-#define BUCK_DUTY_MAX       0.95f
+#define POWERSTAGE_DUTY_MIN       0.15f
+#define POWERSTAGE_DUTY_MAX       0.85f
+#define POWERSTAGE_RATIO_MIN    0.15f
+#define POWERSTAGE_RATIO_MAX    0.85f
+#define CTRL_TS                 0.001f      // 1 kHz
+#define CV_KP                   0.03f
+#define CV_KI                   2.0f
 
+#define CURRENT_MAX 	5.0f		// AMPE
+#define TEMP_MAX 			40.0f   //*C
+typedef struct
+{
+    float kp;
+    float ki;
+
+    float integral;
+
+    float out_min;
+    float out_max;
+
+    float output;
+} PI_Controller_t;
+
+PI_Controller_t cv_pi =
+{
+    .kp = CV_KP,
+    .ki = CV_KI,
+
+    .integral = 0.0f,
+
+    .out_min = POWERSTAGE_RATIO_MIN,
+    .out_max = POWERSTAGE_RATIO_MAX,
+
+    .output = 0.5f       // b?t d?u t?i Vin = Vout
+};
 typedef struct
 {
     float vin;
@@ -102,16 +134,16 @@ typedef struct
     float current;
     float temp;
     float vset;
-    uint8_t buck_on;
-} BuckData_t;
-static BuckData_t buck =
+    uint8_t enable;
+} PowerStage_t;
+static PowerStage_t PowerStage =
 {
     .vin = 0,
     .vout = 0,
     .current = 0,
     .temp = 0,
     .vset = 5.0f,
-    .buck_on = 0
+    .enable = 0
 };
 static volatile uint16_t adc_current_raw = 0;
 static volatile uint8_t adc_current_ready = 0;
@@ -121,8 +153,8 @@ static int32_t enc_acc = 0;
 
 static uint32_t t_adc = 0;
 static uint32_t t_lcd = 0;
-static uint8_t buck_pwm_running = 0;
-#define ADC1_DMA_LEN 1
+static uint8_t PowerStage_pwm_running = 0;
+#define ADC1_DMA_LEN 3
 
 static uint16_t adc1_dma_buf[ADC1_DMA_LEN];
 
@@ -164,15 +196,11 @@ static uint16_t ADC_Read_Channel(ADC_HandleTypeDef *hadc, uint32_t channel)
 
     HAL_ADC_Start(hadc);
     HAL_ADC_PollForConversion(hadc, 10);
-		uint32_t sum = 0;
-
-    for(uint8_t i = 0; i < 5; i++)
-    {
-			sum += HAL_ADC_GetValue(hadc);
-		}
+		uint32_t adc_value = 0;
+		adc_value = HAL_ADC_GetValue(hadc);
     HAL_ADC_Stop(hadc);
 
-    return (uint16_t)(sum / 5);
+    return (uint16_t)adc_value;
 }
 
 static float ADC_To_Voltage(uint16_t adc)
@@ -180,16 +208,14 @@ static float ADC_To_Voltage(uint16_t adc)
     return ((float)adc * VREF) / ADC_MAX;
 }
 
-static float Read_Vout(void)
+static float Read_Vout(uint16_t adc_vout)
 {
-    uint16_t raw = ADC_Read_Channel(&hadc2, ADC_CHANNEL_0);
-    return ADC_To_Voltage(raw) * VOUT_DIV_GAIN;
+    return ADC_To_Voltage(adc_vout) * VOUT_DIV_GAIN;
 }
 
-static float Read_Vin(void)
+static float Read_Vin(uint16_t adc_vin)
 {
-    uint16_t raw = ADC_Read_Channel(&hadc2, ADC_CHANNEL_1);
-    return ADC_To_Voltage(raw) * VIN_DIV_GAIN;
+    return ADC_To_Voltage(adc_vin) * VIN_DIV_GAIN;
 }
 
 static float Read_NTC_Temp(void)
@@ -211,26 +237,15 @@ static float Read_NTC_Temp(void)
 
     return temp_k - 273.15f;
 }
-#define CURRENT_GAIN        200.0f // 1.884
-#define SHUNT_R             0.01f
-#define CURRENT_OFFSET_V    0.05f
-static float Read_Current_From_DMA(void)
+#define CURRENT_GAIN        12.0f // 1.884
+#define SHUNT_R             0.01853f
+uint16_t adc_offset = 0;
+static float Read_Current(uint16_t adc_current)
 {
-    uint32_t sum = 0;
-
-//    for(uint8_t i = 0; i < ADC1_DMA_LEN; i++)
-//    {
-//        sum += adc1_dma_buf[i];
-//    }
-
-//    float adc_avg = (float)sum / ADC1_DMA_LEN;
-    float v_adc = adc1_dma_buf[0] * 3.3f / 4095.0f;
-
-    float current = (v_adc - CURRENT_OFFSET_V) / CURRENT_GAIN / SHUNT_R;
-
+    float v_adc = (adc_current - adc_offset) * 3.3f / 4095.0f;
+    float current = (v_adc) / CURRENT_GAIN / SHUNT_R;
     if(current < 0.0f)
         current = 0.0f;
-
     return current;
 }
 
@@ -239,14 +254,7 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
     if(hadc->Instance == ADC1)
     {
         adc1_dma_ready = 1;
-				HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
     }
-}
-static float Read_Current_From_ADC1(void)
-{
-    float v_adc = ADC_To_Voltage(adc_current_raw);
-    float v_shunt = v_adc / CURRENT_GAIN;
-    return v_shunt / SHUNT_R;
 }
 static void Encoder_Update(void)
 {
@@ -260,105 +268,164 @@ static void Encoder_Update(void)
     while(enc_acc >= ENC_COUNT_PER_STEP)
     {
         enc_acc -= ENC_COUNT_PER_STEP;
-        buck.vset += SET_V_STEP;
+        PowerStage.vset += SET_V_STEP;
 
-        if(buck.vset > SET_V_MAX)
-            buck.vset = SET_V_MAX;
+        if(PowerStage.vset > SET_V_MAX)
+            PowerStage.vset = SET_V_MAX;
     }
 
     while(enc_acc <= -ENC_COUNT_PER_STEP)
     {
         enc_acc += ENC_COUNT_PER_STEP;
-        buck.vset -= SET_V_STEP;
+        PowerStage.vset -= SET_V_STEP;
 
-        if(buck.vset < SET_V_MIN)
-            buck.vset = SET_V_MIN;
+        if(PowerStage.vset < SET_V_MIN)
+            PowerStage.vset = SET_V_MIN;
     }
 }
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
     if(GPIO_Pin == GPIO_PIN_4)
     {
-        buck.buck_on = !buck.buck_on;
+        PowerStage.enable = !PowerStage.enable;
     }
 }
-static void Buck_PWM_Start(void)
+static void PowerStage_Start(void)
 {
-    if(buck_pwm_running)
+    if(PowerStage_pwm_running)
         return;
 
     HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
     HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_1);
-
-    buck_pwm_running = 1;
+		HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
+    HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_2);
+    PowerStage_pwm_running = 1;
 }
 
-static void Buck_PWM_Stop(void)
+static void PowerStage_Stop(void)
 {
-    if(!buck_pwm_running)
+    if(!PowerStage_pwm_running)
         return;
-
+		TIM1 -> CCR1 = 0;
+		TIM2 -> CCR2 = 0;
     HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_1);
     HAL_TIMEx_PWMN_Stop(&htim1, TIM_CHANNEL_1);
-
-    buck_pwm_running = 0;
-}
-
-static void Boost_PWM_Stop(void)
-{
-    HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_2);
+		HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_2);
     HAL_TIMEx_PWMN_Stop(&htim1, TIM_CHANNEL_2);
-
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, 0);
+    PowerStage_pwm_running = 0;
 }
 uint16_t duty_buck = 0, duty_boost = 0;
-static void Buck_SetDuty(float duty)
+static void PowerStage_SetRatio(float ratio)
 {
-    if(duty < BUCK_DUTY_MIN)
-        duty = BUCK_DUTY_MIN;
+    if(ratio < POWERSTAGE_DUTY_MIN)
+        ratio = POWERSTAGE_DUTY_MIN;
 
-    if(duty > BUCK_DUTY_MAX)
-        duty = BUCK_DUTY_MAX;
+    if(ratio > POWERSTAGE_DUTY_MAX)
+        ratio = POWERSTAGE_DUTY_MAX;
 
-    uint32_t ccr = (uint32_t)(duty * (float)(999 + 1));
+    uint32_t ccr = (uint32_t)(ratio * (float)(999 + 1));
 		duty_buck = ccr;
 		duty_boost = 1000 - ccr;
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, duty_buck);
-		__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, duty_boost);
-		__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, duty_buck / 2);
+		TIM1 -> CCR1 = duty_buck;
+		TIM1 -> CCR2 = duty_boost;
+//    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, duty_buck);
+//		__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, duty_boost);
 }
 float duty = 0;
-static void Buck_Control_OpenLoop(void)
+static void PowerStage_Control_OpenLoop(void)
 {
-    if(!buck.buck_on)
+    if(!PowerStage.enable)
     {
-				Buck_SetDuty(0);
-        Buck_PWM_Stop();
+				PowerStage_SetRatio(0);
+        PowerStage_Stop();
         return;
     }
 
-    if(buck.vin < 2.0f)
+    if(PowerStage.vin < 2.0f)
     {
-        Buck_PWM_Stop();
-        buck.buck_on = 0;
+        PowerStage_Stop();
+        PowerStage.enable = 0;
         return;
     }
 
-    if(buck.current > 3.0f || buck.temp > 80.0f)
+    if(PowerStage.current > 3.0f || PowerStage.temp > 80.0f)
     {
-        Buck_PWM_Stop();
-        buck.buck_on = 0;
+        PowerStage_Stop();
+        PowerStage.enable = 0;
         return;
     }
-
-    duty = buck.vset / buck.vin;
+		PowerStage_Start();
+    duty = PowerStage.vset / PowerStage.vin;
     
-    Buck_SetDuty(buck.vset / 10.0f);
+    PowerStage_SetRatio(PowerStage.vset / 10.0f);
 }
-static void Buck_Control_TestPWM(void)
+static void PowerStage_Control_CloseLoop(void)
 {
-    Buck_PWM_Start();
-    Buck_SetDuty(0.30f);
+    if(!PowerStage.enable)
+    {
+        cv_pi.integral = 0.0f;
+        cv_pi.output = 0.5f;
+
+        PowerStage_SetRatio(0.5f);
+        PowerStage_Stop();
+        return;
+    }
+
+    if(PowerStage.vin < 2.0f)
+    {
+        PowerStage_Stop();
+        PowerStage.enable = 0;
+        return;
+    }
+
+    if(PowerStage.current > CURRENT_MAX || PowerStage.temp > TEMP_MAX)
+    {
+        PowerStage_Stop();
+        PowerStage.enable = 0;
+        return;
+    }
+
+    PowerStage_Start();
+
+    //---------------------------------------
+    // Voltage PI
+    //---------------------------------------
+
+    float error = PowerStage.vset - PowerStage.vout;
+
+    cv_pi.integral += cv_pi.ki * error * CTRL_TS;
+
+    float output = cv_pi.kp * error + cv_pi.integral;
+
+    //---------------------------------------
+    // Anti-windup
+    //---------------------------------------
+
+    if(output > cv_pi.out_max)
+    {
+        output = cv_pi.out_max;
+
+        if(error > 0)
+            cv_pi.integral -= cv_pi.ki * error * CTRL_TS;
+    }
+
+    if(output < cv_pi.out_min)
+    {
+        output = cv_pi.out_min;
+
+        if(error < 0)
+            cv_pi.integral -= cv_pi.ki * error * CTRL_TS;
+    }
+
+    cv_pi.output = output;
+
+    PowerStage_SetRatio(output);
+}
+static float clampf(float x, float min, float max)
+{
+    if(x < min) return min;
+    if(x > max) return max;
+    return x;
 }
 static void LCD_DrawBase(void)
 {
@@ -386,28 +453,29 @@ static void LCD_Update(void)
 {
     char buf[24];
 
-    fmt_float(buf, buck.vin, 2, " V");
+    fmt_float(buf, PowerStage.vin, 2, " V");
     LCD_PrintValue(55, 22, buf, ST7735_CYAN);
 
-    fmt_float(buf, buck.vout, 2, " V");
+    fmt_float(buf, PowerStage.vout, 2, " V");
     LCD_PrintValue(55, 40, buf, ST7735_GREEN);
 
-    fmt_float(buf, buck.current, 2, " A");
+    fmt_float(buf, PowerStage.current, 2, " A");
     LCD_PrintValue(55, 58, buf, ST7735_YELLOW);
 
-    fmt_float(buf, buck.temp, 1, " C");
+    fmt_float(buf, PowerStage.temp, 1, " C");
     LCD_PrintValue(55, 76, buf, ST7735_MAGENTA);
 
-    fmt_float(buf, buck.vset, 1, " V");
+    fmt_float(buf, PowerStage.vset, 1, " V");
     LCD_PrintValue(55, 94, buf, ST7735_WHITE);
 
     ST7735_FillRectangle(55, 112, 90, 12, ST7735_BLACK);
 
-    if(buck.buck_on)
+    if(PowerStage.enable)
         ST7735_WriteString(55, 112, "ON", Font_7x10, ST7735_GREEN, ST7735_BLACK);
     else
         ST7735_WriteString(55, 112, "OFF", Font_7x10, ST7735_RED, ST7735_BLACK);
 }
+
 void Buck_UI_Init(void)
 {
 
@@ -418,20 +486,8 @@ void Buck_UI_Init(void)
 
     enc_last = (int16_t)__HAL_TIM_GET_COUNTER(&htim2);
 
-    Boost_PWM_Stop();
-    Buck_PWM_Stop();
-		HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
-		HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_1);
-		HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
-		HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_2);
+    PowerStage_Stop();
 	
-	
-//    uint32_t arr = __HAL_TIM_GET_AUTORELOAD(&htim1);
-//    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, arr / 2);
-		
-    
-
-		HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
 		HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc1_dma_buf, ADC1_DMA_LEN);
     ST7735_Init();
     ST7735_FillScreen(ST7735_BLACK);
@@ -439,41 +495,38 @@ void Buck_UI_Init(void)
     LCD_DrawBase();
     LCD_Update();
 		
+		HAL_TIM_Base_Start_IT(&htim3);
+		HAL_Delay(500);
+		adc_offset = adc1_dma_buf[2];
 }
 
-void Buck_UI_Loop(void)
-{
-    Encoder_Update();
-
-    if(HAL_GetTick() - t_adc >= 50)
-    {
-        t_adc = HAL_GetTick();
-
-        float vin_new = Read_Vin();
-        float vout_new = Read_Vout();
-        float temp_new = Read_NTC_Temp() + 32.4f;
-
-        buck.vin = buck.vin * 0.8f + vin_new * 0.2f;
-        buck.vout = buck.vout * 0.8f + vout_new * 0.2f;
-        buck.temp = buck.temp * 0.8f + temp_new * 0.2f;
-
-        if(adc1_dma_ready)
+void handle_temp(){
+		float temp_new = Read_NTC_Temp() + 32.4f;
+		PowerStage.temp = PowerStage.temp * 0.5f + temp_new * 0.5f;
+		if(PowerStage.temp >= 60.0f)
 		{
-				adc1_dma_ready = 0;
-
-				float cur_new = Read_Current_From_DMA();
-
-				buck.current = buck.current * 0.8f + cur_new * 0.2f;
+			HAL_GPIO_WritePin(GPIOC, GPIO_PIN_15, 1);
 		}
-
-        Buck_Control_OpenLoop();
-    }
-
-    if(HAL_GetTick() - t_lcd >= 200)
-    {
-        t_lcd = HAL_GetTick();
-        LCD_Update();
-    }
+		else if(PowerStage.temp < 50.0f)
+		{
+			HAL_GPIO_WritePin(GPIOC, GPIO_PIN_15, 0);
+		}
+}
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  /* Prevent unused argument(s) compilation warning */
+  UNUSED(htim);
+	float vin_new = Read_Vin(adc1_dma_buf[1]);
+	float vout_new = Read_Vout(adc1_dma_buf[0]);
+	float current_new = Read_Current(adc1_dma_buf[2]);
+	PowerStage.vin = PowerStage.vin * 0.8f + vin_new * 0.2f;
+	PowerStage.vout = PowerStage.vout * 0.8f + vout_new * 0.2f;
+  PowerStage.current = PowerStage.current * 0.8f + current_new * 0.2f;
+//	BuckBoost_CV_Control_1kHz();
+	PowerStage_Control_CloseLoop();
+  /* NOTE : This function should not be modified, when the callback is needed,
+            the HAL_TIM_PeriodElapsedCallback could be implemented in the user file
+   */
 }
 /* USER CODE END 0 */
 
@@ -512,6 +565,7 @@ int main(void)
   MX_ADC2_Init();
   MX_TIM1_Init();
   MX_TIM2_Init();
+  MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
 	Buck_UI_Init();
   /* USER CODE END 2 */
@@ -523,8 +577,13 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-		Buck_UI_Loop();
-
+		Encoder_Update();
+		if(HAL_GetTick() - t_lcd >= 200)
+    {
+        t_lcd = HAL_GetTick();
+				handle_temp();
+        LCD_Update();
+    }
   }
   /* USER CODE END 3 */
 }
@@ -596,12 +655,12 @@ static void MX_ADC1_Init(void)
   /** Common config
   */
   hadc1.Instance = ADC1;
-  hadc1.Init.ScanConvMode = ADC_SCAN_DISABLE;
-  hadc1.Init.ContinuousConvMode = DISABLE;
+  hadc1.Init.ScanConvMode = ADC_SCAN_ENABLE;
+  hadc1.Init.ContinuousConvMode = ENABLE;
   hadc1.Init.DiscontinuousConvMode = DISABLE;
-  hadc1.Init.ExternalTrigConv = ADC_EXTERNALTRIGCONV_T1_CC3;
+  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
   hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
-  hadc1.Init.NbrOfConversion = 1;
+  hadc1.Init.NbrOfConversion = 3;
   if (HAL_ADC_Init(&hadc1) != HAL_OK)
   {
     Error_Handler();
@@ -609,9 +668,27 @@ static void MX_ADC1_Init(void)
 
   /** Configure Regular Channel
   */
-  sConfig.Channel = ADC_CHANNEL_2;
+  sConfig.Channel = ADC_CHANNEL_0;
   sConfig.Rank = ADC_REGULAR_RANK_1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_1CYCLE_5;
+  sConfig.SamplingTime = ADC_SAMPLETIME_71CYCLES_5;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Regular Channel
+  */
+  sConfig.Channel = ADC_CHANNEL_1;
+  sConfig.Rank = ADC_REGULAR_RANK_2;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Regular Channel
+  */
+  sConfig.Channel = ADC_CHANNEL_2;
+  sConfig.Rank = ADC_REGULAR_RANK_3;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
     Error_Handler();
@@ -656,27 +733,9 @@ static void MX_ADC2_Init(void)
 
   /** Configure Regular Channel
   */
-  sConfig.Channel = ADC_CHANNEL_0;
+  sConfig.Channel = ADC_CHANNEL_3;
   sConfig.Rank = ADC_REGULAR_RANK_1;
   sConfig.SamplingTime = ADC_SAMPLETIME_71CYCLES_5;
-  if (HAL_ADC_ConfigChannel(&hadc2, &sConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  /** Configure Regular Channel
-  */
-  sConfig.Channel = ADC_CHANNEL_1;
-  sConfig.Rank = ADC_REGULAR_RANK_2;
-  if (HAL_ADC_ConfigChannel(&hadc2, &sConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  /** Configure Regular Channel
-  */
-  sConfig.Channel = ADC_CHANNEL_3;
-  sConfig.Rank = ADC_REGULAR_RANK_3;
   if (HAL_ADC_ConfigChannel(&hadc2, &sConfig) != HAL_OK)
   {
     Error_Handler();
@@ -746,7 +805,7 @@ static void MX_TIM1_Init(void)
 
   /* USER CODE END TIM1_Init 1 */
   htim1.Instance = TIM1;
-  htim1.Init.Prescaler = 2;
+  htim1.Init.Prescaler = 0;
   htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim1.Init.Period = 1000;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
@@ -795,7 +854,7 @@ static void MX_TIM1_Init(void)
   sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
   sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
   sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
-  sBreakDeadTimeConfig.DeadTime = 50;
+  sBreakDeadTimeConfig.DeadTime = 25;
   sBreakDeadTimeConfig.BreakState = TIM_BREAK_DISABLE;
   sBreakDeadTimeConfig.BreakPolarity = TIM_BREAKPOLARITY_HIGH;
   sBreakDeadTimeConfig.AutomaticOutput = TIM_AUTOMATICOUTPUT_DISABLE;
@@ -856,6 +915,51 @@ static void MX_TIM2_Init(void)
   /* USER CODE BEGIN TIM2_Init 2 */
 
   /* USER CODE END TIM2_Init 2 */
+
+}
+
+/**
+  * @brief TIM3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM3_Init(void)
+{
+
+  /* USER CODE BEGIN TIM3_Init 0 */
+
+  /* USER CODE END TIM3_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM3_Init 1 */
+
+  /* USER CODE END TIM3_Init 1 */
+  htim3.Instance = TIM3;
+  htim3.Init.Prescaler = 71;
+  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim3.Init.Period = 1000;
+  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim3, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM3_Init 2 */
+
+  /* USER CODE END TIM3_Init 2 */
 
 }
 

@@ -1,4 +1,4 @@
-st7735/main.o: ..\Src\main.c ..\Inc\main.h \
+st7735/ui.o: ..\Src\UI.c ..\Inc\UI.h \
   ..\Drivers\STM32F1xx_HAL_Driver\Inc\stm32f1xx_hal.h \
   ..\Inc\stm32f1xx_hal_conf.h \
   ..\Drivers\STM32F1xx_HAL_Driver\Inc\stm32f1xx_hal_rcc.h \
@@ -23,4 +23,4 @@ st7735/main.o: ..\Src\main.c ..\Inc\main.h \
   ..\Drivers\STM32F1xx_HAL_Driver\Inc\stm32f1xx_hal_tim.h \
   ..\Drivers\STM32F1xx_HAL_Driver\Inc\stm32f1xx_hal_tim_ex.h \
   ..\ST7735_LCD_TFT\ST7735_SPI.h ..\SYSTEM\Platform.h \
-  ..\ST7735_LCD_TFT\fonts.h ..\Inc\UI.h
+  ..\ST7735_LCD_TFT\fonts.h

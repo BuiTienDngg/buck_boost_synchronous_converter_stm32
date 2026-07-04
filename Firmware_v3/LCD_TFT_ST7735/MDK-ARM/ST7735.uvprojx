@@ -389,6 +389,16 @@
               <FileType>2</FileType>
               <FilePath>startup_stm32f103xb.s</FilePath>
             </File>
+            <File>
+              <FileName>UI.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Src\UI.c</FilePath>
+            </File>
+            <File>
+              <FileName>ui.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Inc\ui.h</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
@@ -1424,7 +1434,7 @@
   <LayerInfo>
     <Layers>
       <Layer>
-        <LayName>&lt;Project Info&gt;</LayName>
+        <LayName>ST7735</LayName>
         <LayTarg>0</LayTarg>
         <LayPrjMark>1</LayPrjMark>
       </Layer>

@@ -27,6 +27,7 @@
 #include "fonts.h"
 #include <stdio.h>
 #include <math.h>
+#include "UI.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -82,26 +83,76 @@ static void MX_TIM3_Init(void);
 #define VOUT_DIV_GAIN       11.0f
 
 #define NTC_R_PULLUP        10000.0f
-#define NTC_R0              3000.0f
+#define NTC_R0              10000.0f
 #define NTC_BETA            3950.0f
 #define NTC_T0_K            298.15f
 
-#define SET_V_MIN           1.0f
-#define SET_V_MAX           30.0f
+#define SET_V_MIN           2.0f
+#define SET_V_MAX           36.0f
 #define SET_V_STEP          0.1f
 
 #define ENC_COUNT_PER_STEP  4
 
-#define POWERSTAGE_DUTY_MIN       0.15f
-#define POWERSTAGE_DUTY_MAX       0.85f
-#define POWERSTAGE_RATIO_MIN    0.15f
-#define POWERSTAGE_RATIO_MAX    0.85f
-#define CTRL_TS                 0.001f      // 1 kHz
-#define CV_KP                   0.03f
-#define CV_KI                   2.0f
+#define POWERSTAGE_DUTY_MIN       0.1f
+#define POWERSTAGE_DUTY_MAX       0.9f
+#define POWERSTAGE_RATIO_MIN    0.1f
+#define POWERSTAGE_RATIO_MAX    0.9f
 
-#define CURRENT_MAX 	5.0f		// AMPE
-#define TEMP_MAX 			40.0f   //*C
+#define CURRENT_MAX 	10.0f		// AMPE
+#define TEMP_MAX 			80.0f   //*C
+#define VSET_MIN            1.0f
+#define VSET_MAX            30.0f
+#define VSET_STEP           0.1f
+
+#define ISET_MIN            0.1f
+#define ISET_MAX            10.0f
+#define ISET_STEP           0.1f
+
+
+#define CTRL_TS              0.001f
+
+#define VIN_MIN_PROTECT      2.0f
+#define TEMP_MAX_PROTECT     80.0f
+
+#define RATIO_MIN            POWERSTAGE_DUTY_MIN
+#define RATIO_MAX            POWERSTAGE_DUTY_MAX
+
+#define CV_KP                0.015f
+#define CV_KI                0.8f
+
+#define CC_KP                0.025f
+#define CC_KI                1.2f
+
+#define CV_I_MIN            -0.30f
+#define CV_I_MAX             0.30f
+
+#define CC_I_MIN            -0.30f
+#define CC_I_MAX             0.30f
+
+#define SOFTSTART_RATE_VS    8.0f
+#define I_HARD_MARGIN        1.0f
+
+static float cv_i = 0.0f;
+static float cc_i = 0.0f;
+
+static float vref_soft = 0.0f;
+static float ratio_out = 0.5f;
+typedef enum
+{
+    PS_MODE_CV = 0,
+    PS_MODE_CC,
+    PS_MODE_CVCC
+} PowerMode_t;
+
+typedef enum
+{
+    UI_FIELD_VSET = 0,
+    UI_FIELD_ISET,
+    UI_FIELD_MODE,
+    UI_FIELD_OUT,
+    UI_FIELD_COUNT
+} UI_Field_t;
+
 typedef struct
 {
     float kp;
@@ -127,24 +178,37 @@ PI_Controller_t cv_pi =
 
     .output = 0.5f       // b?t d?u t?i Vin = Vout
 };
-typedef struct
+//typedef struct
+//{
+//    float vin;
+//    float vout;
+//    float current;
+//    float temp;
+//    float vset;
+//		float iset;
+//    uint8_t enable;
+//		PowerMode_t mode;
+//} PowerStage_t;
+BBUI_Data_t PowerStage =
 {
-    float vin;
-    float vout;
-    float current;
-    float temp;
-    float vset;
-    uint8_t enable;
-} PowerStage_t;
-static PowerStage_t PowerStage =
-{
-    .vin = 0,
-    .vout = 0,
-    .current = 0,
-    .temp = 0,
-    .vset = 5.0f,
-    .enable = 0
+    .vin = 0.0f,
+    .vout = 0.0f,
+    .current = 0.0f,
+    .temp = 0.0f,
+
+    .vset = 12.0f,
+    .iset = 2.0f,
+
+    .enable = 0,
+		.state = BBUI_STATE_OFF
 };
+
+
+
+static UI_Field_t ui_field = UI_FIELD_VSET;
+static volatile uint8_t ui_full_redraw = 1;
+static volatile uint8_t ui_need_update = 1;
+
 static volatile uint16_t adc_current_raw = 0;
 static volatile uint8_t adc_current_ready = 0;
 
@@ -218,9 +282,10 @@ static float Read_Vin(uint16_t adc_vin)
     return ADC_To_Voltage(adc_vin) * VIN_DIV_GAIN;
 }
 
+uint16_t raw = 0;
 static float Read_NTC_Temp(void)
 {
-    uint16_t raw = ADC_Read_Channel(&hadc2, ADC_CHANNEL_3);
+    raw = ADC_Read_Channel(&hadc2, ADC_CHANNEL_3);
 
     float v = raw * 3.3f / 4095.0f;
 
@@ -237,57 +302,67 @@ static float Read_NTC_Temp(void)
 
     return temp_k - 273.15f;
 }
-#define CURRENT_GAIN        12.0f // 1.884
-#define SHUNT_R             0.01853f
+#define CURRENT_GAIN        24.0f // 1.884
+#define SHUNT_R             0.008f
 uint16_t adc_offset = 0;
 static float Read_Current(uint16_t adc_current)
 {
     float v_adc = (adc_current - adc_offset) * 3.3f / 4095.0f;
-    float current = (v_adc) / CURRENT_GAIN / SHUNT_R;
+    float current = (v_adc) / CURRENT_GAIN / SHUNT_R ;
     if(current < 0.0f)
         current = 0.0f;
     return current;
 }
+static float Read_Current_linear(uint16_t adc)
+{
+    float current = 0.00720f * adc - 2.1007f;
 
+    if(current < 0.0f)
+        current = 0.0f;
+
+    return current;
+}
+#define ADC1_DMA_LEN        3
+#define ADC_AVG_SAMPLES     16
+// 14.57  
+static uint16_t adc1_dma_buf[ADC1_DMA_LEN];
+
+static uint32_t adc_sum[ADC1_DMA_LEN] = {0};
+static uint16_t adc_avg[ADC1_DMA_LEN] = {0};
+static uint16_t adc_sample_cnt = 0;
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
     if(hadc->Instance == ADC1)
     {
-        adc1_dma_ready = 1;
+        for(uint8_t i = 0; i < ADC1_DMA_LEN; i++)
+        {
+            adc_sum[i] += adc1_dma_buf[i];
+        }
+
+        adc_sample_cnt++;
+
+        if(adc_sample_cnt >= ADC_AVG_SAMPLES)
+        {
+            for(uint8_t i = 0; i < ADC1_DMA_LEN; i++)
+            {
+                adc_avg[i] = adc_sum[i] / ADC_AVG_SAMPLES;
+                adc_sum[i] = 0;
+            }
+
+            adc_sample_cnt = 0;
+            adc1_dma_ready = 1;
+        }
     }
 }
-static void Encoder_Update(void)
-{
-    int16_t enc_now = (int16_t)__HAL_TIM_GET_COUNTER(&htim2);
-    int16_t diff = enc_now - enc_last;
 
-    enc_last = enc_now;
-
-    enc_acc += diff;
-
-    while(enc_acc >= ENC_COUNT_PER_STEP)
-    {
-        enc_acc -= ENC_COUNT_PER_STEP;
-        PowerStage.vset += SET_V_STEP;
-
-        if(PowerStage.vset > SET_V_MAX)
-            PowerStage.vset = SET_V_MAX;
-    }
-
-    while(enc_acc <= -ENC_COUNT_PER_STEP)
-    {
-        enc_acc += ENC_COUNT_PER_STEP;
-        PowerStage.vset -= SET_V_STEP;
-
-        if(PowerStage.vset < SET_V_MIN)
-            PowerStage.vset = SET_V_MIN;
-    }
-}
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
+    static uint32_t last_press = 0;
+
     if(GPIO_Pin == GPIO_PIN_4)
     {
-        PowerStage.enable = !PowerStage.enable;
+
+        BBUI_ButtonIRQ();
     }
 }
 static void PowerStage_Start(void)
@@ -421,109 +496,243 @@ static void PowerStage_Control_CloseLoop(void)
 
     PowerStage_SetRatio(output);
 }
+
+
 static float clampf(float x, float min, float max)
 {
     if(x < min) return min;
     if(x > max) return max;
     return x;
 }
-static void LCD_DrawBase(void)
+static float PowerStage_FeedForward_Ratio(float vin, float vref)
 {
-    ST7735_FillScreen(ST7735_BLACK);
+    if(vin < 0.5f)
+        return 0.5f;
 
-    ST7735_WriteString(4, 2, "BUCK MODE", Font_7x10, ST7735_YELLOW, ST7735_BLACK);
+    if(vref < 0.5f)
+        return RATIO_MIN;
 
-    drawHline(0, 15, 160, ST7735_BLUE);
+    float ratio = vref / (vin + vref);
 
-    ST7735_WriteString(4, 22, "Vin :", Font_7x10, ST7735_WHITE, ST7735_BLACK);
-    ST7735_WriteString(4, 40, "Vout:", Font_7x10, ST7735_WHITE, ST7735_BLACK);
-    ST7735_WriteString(4, 58, "Iout:", Font_7x10, ST7735_WHITE, ST7735_BLACK);
-    ST7735_WriteString(4, 76, "Temp:", Font_7x10, ST7735_WHITE, ST7735_BLACK);
-    ST7735_WriteString(4, 94, "Set :", Font_7x10, ST7735_WHITE, ST7735_BLACK);
-    ST7735_WriteString(4, 112, "OUT :", Font_7x10, ST7735_WHITE, ST7735_BLACK);
+    return clampf(ratio, RATIO_MIN, RATIO_MAX);
 }
-
-static void LCD_PrintValue(uint16_t x, uint16_t y, char *str, uint16_t color)
+static void PowerStage_SoftStart_1kHz(void)
 {
-    ST7735_FillRectangle(x, y, 90, 12, ST7735_BLACK);
-    ST7735_WriteString(x, y, str, Font_7x10, color, ST7735_BLACK);
-}
+    if(PowerStage.enable == 0)
+    {
+        vref_soft = 0.0f;
+        return;
+    }
 
-static void LCD_Update(void)
-{
-    char buf[24];
+    if(vref_soft < PowerStage.vset)
+    {
+        vref_soft += SOFTSTART_RATE_VS * CTRL_TS;
 
-    fmt_float(buf, PowerStage.vin, 2, " V");
-    LCD_PrintValue(55, 22, buf, ST7735_CYAN);
-
-    fmt_float(buf, PowerStage.vout, 2, " V");
-    LCD_PrintValue(55, 40, buf, ST7735_GREEN);
-
-    fmt_float(buf, PowerStage.current, 2, " A");
-    LCD_PrintValue(55, 58, buf, ST7735_YELLOW);
-
-    fmt_float(buf, PowerStage.temp, 1, " C");
-    LCD_PrintValue(55, 76, buf, ST7735_MAGENTA);
-
-    fmt_float(buf, PowerStage.vset, 1, " V");
-    LCD_PrintValue(55, 94, buf, ST7735_WHITE);
-
-    ST7735_FillRectangle(55, 112, 90, 12, ST7735_BLACK);
-
-    if(PowerStage.enable)
-        ST7735_WriteString(55, 112, "ON", Font_7x10, ST7735_GREEN, ST7735_BLACK);
+        if(vref_soft > PowerStage.vset)
+            vref_soft = PowerStage.vset;
+    }
     else
-        ST7735_WriteString(55, 112, "OFF", Font_7x10, ST7735_RED, ST7735_BLACK);
+    {
+        vref_soft = PowerStage.vset;
+    }
 }
+static void PowerStage_CVCC_Reset(void)
+{
+    cv_i = 0.0f;
+    cc_i = 0.0f;
 
+    vref_soft = 0.0f;
+    ratio_out = 0.5f;
+}
+void PowerStage_CloseLoop_CVCC_1kHz(void)
+{
+    if(PowerStage.enable == 0)
+    {
+        PowerStage_CVCC_Reset();
+
+        PowerStage.state = BBUI_STATE_OFF;
+
+        PowerStage_Stop();
+
+        return;
+    }
+		PowerStage_Start();
+    if(PowerStage.vin < VIN_MIN_PROTECT)
+    {
+        PowerStage_CVCC_Reset();
+
+        PowerStage.enable = 0;
+        PowerStage.state = BBUI_STATE_FAULT;
+
+        PowerStage_Stop();
+
+        return;
+    }
+
+    if(PowerStage.temp > TEMP_MAX_PROTECT)
+    {
+        PowerStage_CVCC_Reset();
+
+        PowerStage.enable = 0;
+        PowerStage.state = BBUI_STATE_FAULT;
+
+        PowerStage_Stop();
+
+        return;
+    }
+
+    if(PowerStage.current > PowerStage.iset + I_HARD_MARGIN)
+    {
+        PowerStage_CVCC_Reset();
+
+        PowerStage.enable = 0;
+        PowerStage.state = BBUI_STATE_FAULT;
+
+        PowerStage_Stop();
+
+        return;
+    }
+
+    PowerStage_SoftStart_1kHz();
+
+    float ratio_ff = PowerStage_FeedForward_Ratio(PowerStage.vin, vref_soft);
+
+    float err_v = vref_soft - PowerStage.vout;
+    float err_i = PowerStage.iset - PowerStage.current;
+
+    float cv_i_new = cv_i + CV_KI * err_v * CTRL_TS;
+    float cc_i_new = cc_i + CC_KI * err_i * CTRL_TS;
+
+    cv_i_new = clampf(cv_i_new, CV_I_MIN, CV_I_MAX);
+    cc_i_new = clampf(cc_i_new, CC_I_MIN, CC_I_MAX);
+
+    float ratio_cv_unsat = ratio_ff + CV_KP * err_v + cv_i_new;
+    float ratio_cc_unsat = ratio_ff + CC_KP * err_i + cc_i_new;
+
+    float ratio_cv = clampf(ratio_cv_unsat, RATIO_MIN, RATIO_MAX);
+    float ratio_cc = clampf(ratio_cc_unsat, RATIO_MIN, RATIO_MAX);
+
+    if(!((ratio_cv_unsat > RATIO_MAX && err_v > 0.0f) ||
+         (ratio_cv_unsat < RATIO_MIN && err_v < 0.0f)))
+    {
+        cv_i = cv_i_new;
+    }
+
+    if(!((ratio_cc_unsat > RATIO_MAX && err_i > 0.0f) ||
+         (ratio_cc_unsat < RATIO_MIN && err_i < 0.0f)))
+    {
+        cc_i = cc_i_new;
+    }
+
+    ratio_cv = clampf(ratio_ff + CV_KP * err_v + cv_i, RATIO_MIN, RATIO_MAX);
+    ratio_cc = clampf(ratio_ff + CC_KP * err_i + cc_i, RATIO_MIN, RATIO_MAX);
+
+    if(ratio_cc < ratio_cv)
+    {
+        ratio_out = ratio_cc;
+        PowerStage.state = BBUI_STATE_CC;
+    }
+    else
+    {
+        ratio_out = ratio_cv;
+        PowerStage.state = BBUI_STATE_CV;
+    }
+
+    ratio_out = clampf(ratio_out, RATIO_MIN, RATIO_MAX);
+
+    PowerStage_SetRatio(ratio_out);
+}
 void Buck_UI_Init(void)
 {
-
     HAL_ADCEx_Calibration_Start(&hadc1);
     HAL_ADCEx_Calibration_Start(&hadc2);
 
-    HAL_TIM_Encoder_Start(&htim2, TIM_CHANNEL_ALL);
-
-    enc_last = (int16_t)__HAL_TIM_GET_COUNTER(&htim2);
-
     PowerStage_Stop();
-	
-		HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc1_dma_buf, ADC1_DMA_LEN);
-    ST7735_Init();
-    ST7735_FillScreen(ST7735_BLACK);
 
-    LCD_DrawBase();
-    LCD_Update();
-		
-		HAL_TIM_Base_Start_IT(&htim3);
-		HAL_Delay(500);
-		adc_offset = adc1_dma_buf[2];
+    HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc1_dma_buf, ADC1_DMA_LEN);
+
+    BBUI_Init(&PowerStage, &htim2);
+
+    HAL_TIM_Base_Start_IT(&htim3);
+
+    HAL_Delay(500);
+
+    adc_offset = adc1_dma_buf[2];
 }
-
+uint32_t lastTime_readTemp = 0;
 void handle_temp(){
-		float temp_new = Read_NTC_Temp() + 32.4f;
-		PowerStage.temp = PowerStage.temp * 0.5f + temp_new * 0.5f;
-		if(PowerStage.temp >= 60.0f)
+		if(HAL_GetTick() -  lastTime_readTemp > 2000)
 		{
-			HAL_GPIO_WritePin(GPIOC, GPIO_PIN_15, 1);
+			lastTime_readTemp = HAL_GetTick();
+			float temp_new = Read_NTC_Temp() + 32.4f;
+			PowerStage.temp = PowerStage.temp * 0.5f + temp_new * 0.5f;
+			if(PowerStage.temp >= 40.0f)
+			{
+				HAL_GPIO_WritePin(GPIOC, GPIO_PIN_15, 1);
+			}
+			else if(PowerStage.temp < 38.0f)
+			{
+				HAL_GPIO_WritePin(GPIOC, GPIO_PIN_15, 0);
+			}
 		}
-		else if(PowerStage.temp < 50.0f)
-		{
-			HAL_GPIO_WritePin(GPIOC, GPIO_PIN_15, 0);
-		}
+		
 }
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
   /* Prevent unused argument(s) compilation warning */
   UNUSED(htim);
-	float vin_new = Read_Vin(adc1_dma_buf[1]);
-	float vout_new = Read_Vout(adc1_dma_buf[0]);
-	float current_new = Read_Current(adc1_dma_buf[2]);
-	PowerStage.vin = PowerStage.vin * 0.8f + vin_new * 0.2f;
-	PowerStage.vout = PowerStage.vout * 0.8f + vout_new * 0.2f;
-  PowerStage.current = PowerStage.current * 0.8f + current_new * 0.2f;
+	float vin_new = Read_Vin(adc_avg[1]);
+	float vout_new = Read_Vout(adc_avg[0]);
+	float current_new = Read_Current_linear(adc_avg[2]);
+	PowerStage.vin = PowerStage.vin * 0.7f + vin_new * 0.3f;
+	PowerStage.vout = PowerStage.vout * 0.7f + vout_new * 0.3f;
+  PowerStage.current = PowerStage.current * 0.7f + current_new * 0.3f;
+	if(PowerStage.enable == 0)
+	{
+			PowerStage.state = BBUI_STATE_OFF;
+			PowerStage_Stop();
+			return;
+	}
+
+	if(PowerStage.enable == 0)
+	{
+			PowerStage.state = BBUI_STATE_FAULT;
+			PowerStage.enable = 0;
+			PowerStage_Stop();
+			return;
+	}
+	PowerStage_CloseLoop_CVCC_1kHz();
+	if(PowerStage.current >= PowerStage.iset - 0.05f)
+	{
+			PowerStage.state = BBUI_STATE_CC;
+	}
+	else
+	{
+			PowerStage.state = BBUI_STATE_CV;
+	}
+	
+//	if(PowerStage.enable == 0)
+//	{
+//			PowerStage_Stop();
+//			return;
+//	}
+
+//	if(PowerStage.mode == BBUI_MODE_CV)
+//	{
+//			// CV control
+//		PowerStage_Control_CloseLoop();
+//	}
+//	else if(PowerStage.mode == BBUI_MODE_CC)
+//	{
+//			// CC control
+//	}
+//	else if(PowerStage.mode == BBUI_MODE_CVCC)
+//	{
+//			// CV/CC control
+//	}
 //	BuckBoost_CV_Control_1kHz();
-	PowerStage_Control_CloseLoop();
+	
+//	PowerStage_Control_OpenLoop();
   /* NOTE : This function should not be modified, when the callback is needed,
             the HAL_TIM_PeriodElapsedCallback could be implemented in the user file
    */
@@ -577,13 +786,8 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-		Encoder_Update();
-		if(HAL_GetTick() - t_lcd >= 200)
-    {
-        t_lcd = HAL_GetTick();
-				handle_temp();
-        LCD_Update();
-    }
+		BBUI_Task();
+		handle_temp();
   }
   /* USER CODE END 3 */
 }
@@ -805,7 +1009,7 @@ static void MX_TIM1_Init(void)
 
   /* USER CODE END TIM1_Init 1 */
   htim1.Instance = TIM1;
-  htim1.Init.Prescaler = 0;
+  htim1.Init.Prescaler = 2;
   htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim1.Init.Period = 1000;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
@@ -841,12 +1045,16 @@ static void MX_TIM1_Init(void)
   {
     Error_Handler();
   }
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_LOW;
+  sConfigOC.OCNPolarity = TIM_OCNPOLARITY_LOW;
   if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
   {
     Error_Handler();
   }
   sConfigOC.OCMode = TIM_OCMODE_PWM2;
   sConfigOC.Pulse = 10;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
   if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_3) != HAL_OK)
   {
     Error_Handler();
@@ -854,7 +1062,7 @@ static void MX_TIM1_Init(void)
   sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
   sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
   sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
-  sBreakDeadTimeConfig.DeadTime = 25;
+  sBreakDeadTimeConfig.DeadTime = 50;
   sBreakDeadTimeConfig.BreakState = TIM_BREAK_DISABLE;
   sBreakDeadTimeConfig.BreakPolarity = TIM_BREAKPOLARITY_HIGH;
   sBreakDeadTimeConfig.AutomaticOutput = TIM_AUTOMATICOUTPUT_DISABLE;

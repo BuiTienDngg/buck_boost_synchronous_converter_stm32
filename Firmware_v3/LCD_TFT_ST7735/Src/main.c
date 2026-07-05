@@ -178,17 +178,6 @@ PI_Controller_t cv_pi =
 
     .output = 0.5f       // b?t d?u t?i Vin = Vout
 };
-//typedef struct
-//{
-//    float vin;
-//    float vout;
-//    float current;
-//    float temp;
-//    float vset;
-//		float iset;
-//    uint8_t enable;
-//		PowerMode_t mode;
-//} PowerStage_t;
 BBUI_Data_t PowerStage =
 {
     .vin = 0.0f,
@@ -200,7 +189,18 @@ BBUI_Data_t PowerStage =
     .iset = 2.0f,
 
     .enable = 0,
-		.state = BBUI_STATE_OFF
+    .state = BBUI_STATE_OFF,
+
+    .batt_cells = 3,
+    .active_preset = 0,
+    .mqtt_enable = 0,
+
+    .preset =
+    {
+        {12.0f, 5.0f},
+        {16.8f, 3.0f},
+        {20.0f, 2.5f}
+    }
 };
 
 
@@ -302,13 +302,13 @@ static float Read_NTC_Temp(void)
 
     return temp_k - 273.15f;
 }
-#define CURRENT_GAIN        24.0f // 1.884
-#define SHUNT_R             0.008f
+#define CURRENT_GAIN        22.0f // 1.884
+#define SHUNT_R             0.01f
 uint16_t adc_offset = 0;
 static float Read_Current(uint16_t adc_current)
 {
     float v_adc = (adc_current - adc_offset) * 3.3f / 4095.0f;
-    float current = (v_adc) / CURRENT_GAIN / SHUNT_R ;
+    float current = (v_adc) / CURRENT_GAIN / SHUNT_R  + 0.25f;
     if(current < 0.0f)
         current = 0.0f;
     return current;
@@ -323,13 +323,14 @@ static float Read_Current_linear(uint16_t adc)
     return current;
 }
 #define ADC1_DMA_LEN        3
-#define ADC_AVG_SAMPLES     16
+#define ADC_AVG_SAMPLES     36
 // 14.57  
 static uint16_t adc1_dma_buf[ADC1_DMA_LEN];
 
 static uint32_t adc_sum[ADC1_DMA_LEN] = {0};
 static uint16_t adc_avg[ADC1_DMA_LEN] = {0};
 static uint16_t adc_sample_cnt = 0;
+int adc_calib_offset = 0;
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
     if(hadc->Instance == ADC1)
@@ -351,7 +352,9 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 
             adc_sample_cnt = 0;
             adc1_dma_ready = 1;
+						adc_calib_offset = 1;
         }
+				
     }
 }
 
@@ -359,11 +362,11 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
     static uint32_t last_press = 0;
 
-    if(GPIO_Pin == GPIO_PIN_4)
-    {
+//    if(GPIO_Pin == GPIO_PIN_4)
+//    {
 
-        BBUI_ButtonIRQ();
-    }
+//        BBUI_ButtonIRQ();
+//    }
 }
 static void PowerStage_Start(void)
 {
@@ -650,14 +653,13 @@ void Buck_UI_Init(void)
     PowerStage_Stop();
 
     HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc1_dma_buf, ADC1_DMA_LEN);
+		HAL_Delay(700);
 
     BBUI_Init(&PowerStage, &htim2);
 
     HAL_TIM_Base_Start_IT(&htim3);
-
-    HAL_Delay(500);
-
-    adc_offset = adc1_dma_buf[2];
+		while(!adc_calib_offset);
+    adc_offset = adc_avg[2];
 }
 uint32_t lastTime_readTemp = 0;
 void handle_temp(){
@@ -683,10 +685,10 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   UNUSED(htim);
 	float vin_new = Read_Vin(adc_avg[1]);
 	float vout_new = Read_Vout(adc_avg[0]);
-	float current_new = Read_Current_linear(adc_avg[2]);
-	PowerStage.vin = PowerStage.vin * 0.7f + vin_new * 0.3f;
-	PowerStage.vout = PowerStage.vout * 0.7f + vout_new * 0.3f;
-  PowerStage.current = PowerStage.current * 0.7f + current_new * 0.3f;
+	float current_new = Read_Current(adc_avg[2]);
+	PowerStage.vin = PowerStage.vin * 0.9f + vin_new * 0.1f;
+	PowerStage.vout = PowerStage.vout * 0.9f + vout_new * 0.1f;
+  PowerStage.current = PowerStage.current * 0.9f + current_new * 0.1f;
 	if(PowerStage.enable == 0)
 	{
 			PowerStage.state = BBUI_STATE_OFF;
@@ -1062,7 +1064,7 @@ static void MX_TIM1_Init(void)
   sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
   sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
   sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
-  sBreakDeadTimeConfig.DeadTime = 50;
+  sBreakDeadTimeConfig.DeadTime = 30;
   sBreakDeadTimeConfig.BreakState = TIM_BREAK_DISABLE;
   sBreakDeadTimeConfig.BreakPolarity = TIM_BREAKPOLARITY_HIGH;
   sBreakDeadTimeConfig.AutomaticOutput = TIM_AUTOMATICOUTPUT_DISABLE;

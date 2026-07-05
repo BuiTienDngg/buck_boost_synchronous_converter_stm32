@@ -12,13 +12,11 @@ typedef enum
     BBUI_STATE_FAULT
 } BBUI_State_t;
 
-typedef enum
+typedef struct
 {
-    BBUI_FIELD_VSET = 0,
-    BBUI_FIELD_ISET,
-    BBUI_FIELD_OUT,
-    BBUI_FIELD_COUNT
-} BBUI_Field_t;
+    float vset;
+    float iset;
+} BBUI_Preset_t;
 
 typedef struct
 {
@@ -32,12 +30,20 @@ typedef struct
 
     uint8_t enable;
     BBUI_State_t state;
+
+    uint8_t batt_cells;
+    uint8_t active_preset;
+    uint8_t mqtt_enable;
+
+    BBUI_Preset_t preset[3];
 } BBUI_Data_t;
 
 void BBUI_Init(BBUI_Data_t *data, TIM_HandleTypeDef *htim_encoder);
 void BBUI_Task(void);
 void BBUI_ButtonIRQ(void);
 void BBUI_ForceRefresh(void);
-BBUI_Field_t BBUI_GetField(void);
+
+void BBUI_LoadFromFlash(void);
+void BBUI_SaveToFlash(void);
 
 #endif

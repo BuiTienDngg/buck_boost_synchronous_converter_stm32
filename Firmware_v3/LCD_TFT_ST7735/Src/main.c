@@ -308,7 +308,7 @@ uint16_t adc_offset = 0;
 static float Read_Current(uint16_t adc_current)
 {
     float v_adc = (adc_current - adc_offset) * 3.3f / 4095.0f;
-    float current = (v_adc) / CURRENT_GAIN / SHUNT_R  + 0.25f;
+    float current = (v_adc) / CURRENT_GAIN / SHUNT_R ;
     if(current < 0.0f)
         current = 0.0f;
     return current;
@@ -401,11 +401,11 @@ static void PowerStage_SetRatio(float ratio)
     if(ratio > POWERSTAGE_DUTY_MAX)
         ratio = POWERSTAGE_DUTY_MAX;
 
-    uint32_t ccr = (uint32_t)(ratio * (float)(999 + 1));
+    uint32_t ccr = (uint32_t)(ratio * (float)(999));
 		duty_buck = ccr;
 		duty_boost = 1000 - ccr;
 		TIM1 -> CCR1 = duty_buck;
-		TIM1 -> CCR2 = duty_boost;
+		TIM1 -> CCR2 = 985;
 //    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, duty_buck);
 //		__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, duty_boost);
 }
@@ -642,7 +642,6 @@ void PowerStage_CloseLoop_CVCC_1kHz(void)
     }
 
     ratio_out = clampf(ratio_out, RATIO_MIN, RATIO_MAX);
-
     PowerStage_SetRatio(ratio_out);
 }
 void Buck_UI_Init(void)
@@ -1064,7 +1063,7 @@ static void MX_TIM1_Init(void)
   sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
   sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
   sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
-  sBreakDeadTimeConfig.DeadTime = 30;
+  sBreakDeadTimeConfig.DeadTime = 25;
   sBreakDeadTimeConfig.BreakState = TIM_BREAK_DISABLE;
   sBreakDeadTimeConfig.BreakPolarity = TIM_BREAKPOLARITY_HIGH;
   sBreakDeadTimeConfig.AutomaticOutput = TIM_AUTOMATICOUTPUT_DISABLE;

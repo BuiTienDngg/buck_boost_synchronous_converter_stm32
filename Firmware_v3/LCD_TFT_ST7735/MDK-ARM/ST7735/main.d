@@ -6,7 +6,14 @@ st7735/main.o: ..\Src\main.c ..\Inc\main.h \
   ..\Drivers\CMSIS\Device\ST\STM32F1xx\Include\stm32f1xx.h \
   ..\Drivers\CMSIS\Device\ST\STM32F1xx\Include\stm32f103xb.h \
   ..\Drivers\CMSIS\Include\core_cm3.h \
+  C:\Keil_v5\ARM\ARMCLANG\Bin\..\include\stdint.h \
+  ..\Drivers\CMSIS\Include\cmsis_version.h \
+  ..\Drivers\CMSIS\Include\cmsis_compiler.h \
+  ..\Drivers\CMSIS\Include\cmsis_armclang.h \
+  C:\Keil_v5\ARM\ARMCLANG\Bin\..\include\arm_compat.h \
+  C:\Keil_v5\ARM\ARMCLANG\Bin\..\include\arm_acle.h \
   ..\Drivers\CMSIS\Device\ST\STM32F1xx\Include\system_stm32f1xx.h \
+  C:\Keil_v5\ARM\ARMCLANG\Bin\..\include\stddef.h \
   ..\Drivers\STM32F1xx_HAL_Driver\Inc\stm32f1xx_hal_rcc_ex.h \
   ..\Drivers\STM32F1xx_HAL_Driver\Inc\stm32f1xx_hal_gpio.h \
   ..\Drivers\STM32F1xx_HAL_Driver\Inc\stm32f1xx_hal_gpio_ex.h \
@@ -22,5 +29,9 @@ st7735/main.o: ..\Src\main.c ..\Inc\main.h \
   ..\Drivers\STM32F1xx_HAL_Driver\Inc\stm32f1xx_hal_spi.h \
   ..\Drivers\STM32F1xx_HAL_Driver\Inc\stm32f1xx_hal_tim.h \
   ..\Drivers\STM32F1xx_HAL_Driver\Inc\stm32f1xx_hal_tim_ex.h \
+  C:\Keil_v5\ARM\ARMCLANG\Bin\..\include\string.h \
   ..\ST7735_LCD_TFT\ST7735_SPI.h ..\SYSTEM\Platform.h \
-  ..\ST7735_LCD_TFT\fonts.h ..\Inc\UI.h
+  C:\Keil_v5\ARM\ARMCLANG\Bin\..\include\stdbool.h \
+  ..\ST7735_LCD_TFT\fonts.h ..\ST7735_LCD_TFT\fonts.h \
+  C:\Keil_v5\ARM\ARMCLANG\Bin\..\include\stdio.h \
+  C:\Keil_v5\ARM\ARMCLANG\Bin\..\include\math.h ..\Inc\UI.h

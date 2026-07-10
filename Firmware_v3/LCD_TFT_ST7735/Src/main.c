@@ -308,7 +308,7 @@ uint16_t adc_offset = 0;
 static float Read_Current(uint16_t adc_current)
 {
     float v_adc = (adc_current - adc_offset) * 3.3f / 4095.0f;
-    float current = (v_adc) / CURRENT_GAIN / SHUNT_R ;
+    float current = (v_adc) / CURRENT_GAIN / SHUNT_R + 0.32f;
     if(current < 0.0f)
         current = 0.0f;
     return current;
@@ -403,9 +403,9 @@ static void PowerStage_SetRatio(float ratio)
 
     uint32_t ccr = (uint32_t)(ratio * (float)(999));
 		duty_buck = ccr;
-		duty_boost = 1000 - ccr;
+		duty_boost = 999 - ccr;
 		TIM1 -> CCR1 = duty_buck;
-		TIM1 -> CCR2 = 985;
+		TIM1 -> CCR2 = duty_boost;
 //    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, duty_buck);
 //		__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, duty_boost);
 }

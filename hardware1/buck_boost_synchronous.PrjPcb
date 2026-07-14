@@ -97,6 +97,10 @@ DItemRevisionGUID=
 GenerateClassCluster=0
 DocumentUniqueId=RTLLAJXR
 
+[GeneratedDocument1]
+DocumentPath=Project Outputs for buck_boost_synchronous\Design Rule Check - PCB3.html
+DItemRevisionGUID=
+
 [Configuration1]
 Name=Sources
 ParameterCount=0

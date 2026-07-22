@@ -37,6 +37,15 @@ typedef struct
 
     BBUI_Preset_t preset[3];
 } BBUI_Data_t;
+typedef enum
+{
+    MAIN_VSET = 0,
+    MAIN_ISET,
+    MAIN_PRESET,
+    MAIN_OUT,
+    MAIN_COUNT,
+		MAIN_OUT_OFF
+} UI_MainField_t;
 
 void BBUI_Init(BBUI_Data_t *data, TIM_HandleTypeDef *htim_encoder);
 void BBUI_Task(void);
@@ -45,5 +54,5 @@ void BBUI_ForceRefresh(void);
 
 void BBUI_LoadFromFlash(void);
 void BBUI_SaveToFlash(void);
-
+void handleUI(void);
 #endif

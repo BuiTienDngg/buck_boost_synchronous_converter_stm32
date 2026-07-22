@@ -40,14 +40,6 @@ typedef enum
     UI_PAGE_EDIT_I
 } UI_Page_t;
 
-typedef enum
-{
-    MAIN_VSET = 0,
-    MAIN_ISET,
-    MAIN_PRESET,
-    MAIN_OUT,
-    MAIN_COUNT
-} UI_MainField_t;
 
 typedef enum
 {
@@ -95,7 +87,15 @@ typedef enum
     SYSTEM_BACK,
     SYSTEM_COUNT
 } UI_SystemItem_t;
+typedef enum
+{
+	SET_VOLTAGE = 0,
+	SET_CURRENT,
+	RUN_CC_MODE,
+	RUN_CV_MODE
+} UI_State_t;
 
+UI_State_t ui_state;
 typedef struct
 {
     uint32_t magic;
@@ -114,13 +114,13 @@ typedef struct
     uint32_t checksum;
 } UI_FlashData_t;
 
-static BBUI_Data_t *ui = 0;
+BBUI_Data_t *ui = 0;
 static TIM_HandleTypeDef *enc_tim = 0;
 
 static UI_Page_t page = UI_PAGE_MAIN;
 static UI_Page_t prev_page = UI_PAGE_MENU;
 
-static UI_MainField_t main_field = MAIN_VSET;
+UI_MainField_t main_field = MAIN_VSET;
 static uint8_t menu_index = 0;
 
 static int16_t enc_last = 0;
@@ -173,30 +173,6 @@ static void ClearCache(void)
     c_out[0] = 0;
     c_hint[0] = 0;
 }
-
-static const char* StateText(BBUI_State_t s)
-{
-    switch(s)
-    {
-        case BBUI_STATE_OFF:   return "OFF";
-        case BBUI_STATE_CV:    return "CV";
-        case BBUI_STATE_CC:    return "CC";
-        case BBUI_STATE_FAULT: return "FLT";
-        default:               return "---";
-    }
-}
-
-static uint16_t StateColor(BBUI_State_t s)
-{
-    switch(s)
-    {
-        case BBUI_STATE_OFF:   return ST7735_WHITE;
-        case BBUI_STATE_CV:    return ST7735_GREEN;
-        case BBUI_STATE_CC:    return ST7735_YELLOW;
-        case BBUI_STATE_FAULT: return ST7735_RED;
-        default:               return ST7735_WHITE;
-    }
-}
 static void FmtNumber(char *buf, float value, uint8_t dec)
 {
     int32_t scale = 1;
@@ -220,11 +196,11 @@ static void FmtNumber(char *buf, float value, uint8_t dec)
     else
     {
         if(dec == 0)
-            sprintf(buf, "%ld", v);
+            sprintf(buf, "%02ld", v);
         else if(dec == 1)
-            sprintf(buf, "%ld.%01ld", v / scale, v % scale);
+            sprintf(buf, "%02ld.%01ld", v / scale, v % scale);
         else
-            sprintf(buf, "%ld.%02ld", v / scale, v % scale);
+            sprintf(buf, "%02ld.%02ld", v / scale, v % scale);
     }
 }
 static void FmtFloat(char *buf, float value, uint8_t dec, const char *unit)
@@ -391,367 +367,113 @@ static void SetDefaultConfig(void)
     ui->preset[2].iset = 2.5f;
 }
 
-static void SavePreset(uint8_t id)
-{
-    if(ui == 0 || id > 2)
-        return;
 
-    ui->preset[id].vset = ui->vset;
-    ui->preset[id].iset = ui->iset;
-    ui->active_preset = id;
-}
-
-static void LoadPreset(uint8_t id)
-{
-    if(ui == 0 || id > 2)
-        return;
-
-    ui->active_preset = id;
-    ui->vset = ui->preset[id].vset;
-    ui->iset = ui->preset[id].iset;
-
-    ClearCache();
-    dirty = 1;
-}
-
-static void SelectBattery(uint8_t cells)
-{
-    if(ui == 0)
-        return;
-
-    if(cells < 1) cells = 1;
-    if(cells > 6) cells = 6;
-
-    ui->batt_cells = cells;
-    ui->vset = 4.20f * (float)cells;
-
-    ClearCache();
-    dirty = 1;
-}
-
-static void ChangePage(UI_Page_t next)
-{
-    page = next;
-    menu_index = 0;
-    force_redraw = 1;
-    dirty = 1;
-}
-
-static void DrawTitle(const char *title)
-{
-    ST7735_FillScreen(ST7735_BLACK);
-    ST7735_WriteString(4, 2, title, UI_FONT_SMALL, ST7735_YELLOW, ST7735_BLACK);
-    drawHline(0, 15, 160, ST7735_BLUE);
-
-    ClearCache();
-}
-
-static void DrawListCursor(uint8_t index, uint8_t count)
-{
-    ST7735_FillRectangle(2, 20, 12, 96, ST7735_BLACK);
-
-    if(index >= count)
-        return;
-
-    ST7735_WriteString(4, 22 + index * 14, ">", UI_FONT_SMALL, ST7735_YELLOW, ST7735_BLACK);
-}
 
 static void DrawMainBase(void)
 {
-    ST7735_FillScreen(ST7735_BLACK);
-
-    ST7735_WriteString(4, 2, "BUCK-BOOST", UI_FONT_SMALL, ST7735_YELLOW, ST7735_BLACK);
-    drawHline(0, 15, 160, ST7735_BLUE);
-
-    //drawVline(98, 16, 99, ST7735_BLUE);
-
-    ST7735_WriteString(0, 20, "U", UI_FONT_MEDIUM, ST7735_CYAN, ST7735_BLACK);
-    ST7735_WriteString(0, 50, "I", UI_FONT_MEDIUM, ST7735_CYAN, ST7735_BLACK);
-    ST7735_WriteString(0, 80, "P", UI_FONT_MEDIUM, ST7735_YELLOW, ST7735_BLACK);
-
-    ST7735_WriteString(103 - 30, 20, "IN",  UI_FONT_SMALL, ST7735_BLUE, ST7735_BLACK);
-		ST7735_WriteString(103 - 30, 34, "TMP", UI_FONT_SMALL, ST7735_MAGENTA, ST7735_BLACK);
-		ST7735_WriteString(103 - 30, 48, "SET", UI_FONT_SMALL, ST7735_CYAN, ST7735_BLACK);
-		ST7735_WriteString(103 - 30, 62, "LIM", UI_FONT_SMALL, ST7735_CYAN, ST7735_BLACK);
-		ST7735_WriteString(103 - 30, 76, "MEM", UI_FONT_SMALL, ST7735_MAGENTA, ST7735_BLACK);
-		ST7735_WriteString(103 - 30, 90, "OUT", UI_FONT_SMALL, ST7735_WHITE, ST7735_BLACK);
-
-    drawHline(0, 115, 160, ST7735_BLUE);
-    ST7735_WriteString(4, 118, "BTN:SEL HOLD:MENU", UI_FONT_SMALL, ST7735_BLUE, ST7735_BLACK);
-
+		ST7735_FillScreen(ST7735_BLACK);
+    ST7735_WriteString(110, 13,  "U", UI_FONT_SMALL, ST7735_GREEN, ST7735_BLACK);
+    ST7735_WriteString(110, 43, "I", UI_FONT_SMALL, ST7735_YELLOW, ST7735_BLACK);
+    ST7735_WriteString(110, 73,  "P", UI_FONT_SMALL, ST7735_MAGENTA, ST7735_BLACK);
+		
+	
+		ST7735_WriteString(0, 60,  "SET", UI_FONT_SMALL, ST7735_MAGENTA, ST7735_BLACK);
+		ST7735_WriteString(0, 70,  "CC", UI_FONT_SMALL, ST7735_BLACK, ST7735_YELLOW);
+		//ST7735_WriteString(5, 70,  "CV", UI_FONT_SMALL, ST7735_BLACK, ST7735_GREEN);
+		
+		
+		
+		
+		
+	
+		ST7735_WriteString(0, 98,  "Vin:", UI_FONT_SMALL, ST7735_CYAN, ST7735_BLACK);
+		ST7735_WriteString(85, 98,  "V", UI_FONT_SMALL, ST7735_CYAN, ST7735_BLACK);
+		
+		ST7735_WriteString(0, 118,  "Ilim:", UI_FONT_SMALL, ST7735_CYAN, ST7735_BLACK);
+		ST7735_WriteString(92, 118,  "A", UI_FONT_SMALL, ST7735_CYAN, ST7735_BLACK);
+		
+		ST7735_WriteString(110, 105,  "*C", UI_FONT_SMALL, ST7735_RED, ST7735_BLACK);
+		
+		drawHline(25, 25,78, ST7735_BLUE);
+		drawHline(25, 55,78, ST7735_BLUE);
+		drawHline(25, 85,78, ST7735_BLUE);
+		
     ClearCache();
 }
 
-static void DrawMainCursor(void)
-{
-    ST7735_FillRectangle(94 - 30, 12, 8, 100, ST7735_BLACK);
-
-    if(main_field == MAIN_VSET)
-        ST7735_WriteString(95 - 30, 48, ">", UI_FONT_SMALL, ST7735_YELLOW, ST7735_BLACK);
-    else if(main_field == MAIN_ISET)
-        ST7735_WriteString(95 - 30, 62, ">", UI_FONT_SMALL, ST7735_YELLOW, ST7735_BLACK);
-    else if(main_field == MAIN_PRESET)
-        ST7735_WriteString(95 - 30, 76, ">", UI_FONT_SMALL, ST7735_YELLOW, ST7735_BLACK);
-    else if(main_field == MAIN_OUT)
-        ST7735_WriteString(95 - 30, 90, ">", UI_FONT_SMALL, ST7735_YELLOW, ST7735_BLACK);
-}
 
 static void UpdateMain(uint8_t force)
 {
     char buf[32];
-
     if(ui == 0)
         return;
-
-    DrawMainCursor();
-
-    sprintf(buf, "%s", StateText(ui->state));
-    WriteCached(c_state,
-                100, 2, 28,
-                buf,
-                UI_FONT_SMALL,
-                StateColor(ui->state),
-                ST7735_BLACK,
-                force);
-
     FmtNumber(buf, ui->vout, 2);
-		WriteCached(c_u,
-								10, 20, 50,
-								buf,
-								UI_FONT_MEDIUM,
-								ST7735_CYAN,
-								ST7735_BLACK,
-								force);
-
+		WriteCached(c_u,25, 0, 50,buf,UI_FONT_BIG,ST7735_GREEN,ST7735_BLACK,force);
 		FmtNumber(buf, ui->current, 2);
-		WriteCached(c_i,
-								10, 50, 50,
-								buf,
-								UI_FONT_MEDIUM,
-								ST7735_CYAN,
-								ST7735_BLACK,
-								force);
+		WriteCached(c_i,25, 30, 50,buf,UI_FONT_BIG,ST7735_YELLOW,ST7735_BLACK,force);
 
-		float power = ui->vout * ui->current;
-
-		if(power < 100.0f)
-				FmtNumber(buf, power, 1);
-		else
-				FmtNumber(buf, power, 0);
-
-		WriteCached(c_p,
-								10, 80, 50,
-								buf,
-								UI_FONT_MEDIUM,
-								ST7735_YELLOW,
-								ST7735_BLACK,
-								force);
-
-    FmtNumber(buf, ui->vin, 1);
-    WriteCached(c_vin,
-                128 - 30, 20, 27,
-                buf,
-                UI_FONT_SMALL,
-                ST7735_BLUE,
-                ST7735_BLACK,
-                force);
-
-    FmtNumber(buf, ui->temp, 1);
-    WriteCached(c_temp,
-                128 - 30, 34, 27,
-                buf,
-                UI_FONT_SMALL,
-                ui->temp > 70.0f ? ST7735_RED : ST7735_MAGENTA,
-                ST7735_BLACK,
-                force);
-
-    FmtNumber(buf, ui->vset, 1);
-    WriteCached(c_set,
-                128 - 30, 48, 27,
-                buf,
-                UI_FONT_SMALL,
-                main_field == MAIN_VSET ? ST7735_YELLOW : ST7735_WHITE,
-                ST7735_BLACK,
-                force || main_field == MAIN_VSET);
-
-    FmtNumber(buf, ui->iset, 1);
-    WriteCached(c_lim,
-                128 - 30, 62, 27,
-                buf,
-                UI_FONT_SMALL,
-                main_field == MAIN_ISET ? ST7735_YELLOW : ST7735_WHITE,
-                ST7735_BLACK,
-                force || main_field == MAIN_ISET);
-
-    sprintf(buf, "M%d", ui->active_preset + 1);
-    WriteCached(c_mem,
-                128 - 30, 76, 27,
-                buf,
-                UI_FONT_SMALL,
-                main_field == MAIN_PRESET ? ST7735_YELLOW : ST7735_MAGENTA,
-                ST7735_BLACK,
-                force || main_field == MAIN_PRESET);
-
-    sprintf(buf, "%s", ui->enable ? "ON" : "OFF");
-    WriteCached(c_out,
-                128 - 30, 90, 27,
-                buf,
-                UI_FONT_SMALL,
-                ui->enable ? ST7735_GREEN : ST7735_RED,
-                ST7735_BLACK,
-                force || main_field == MAIN_OUT);
+		
+		
+		
+		
+		if(main_field == MAIN_VSET)
+		{
+			ST7735_WriteString(0, 70,  "CV", UI_FONT_SMALL, ST7735_BLACK, ST7735_GREEN);
+			FmtNumber(buf, ui->vset, 2);
+			WriteCached(c_p,25, 60, 50,buf,UI_FONT_BIG,ST7735_MAGENTA,ST7735_BLACK,force);
+			
+		}else if(main_field == MAIN_ISET)
+		{
+			FmtNumber(buf, ui->iset, 2);
+			ST7735_WriteString(0, 70,  "CC", UI_FONT_SMALL, ST7735_BLACK, ST7735_YELLOW);
+			WriteCached(c_p,25, 60, 50,buf,UI_FONT_BIG,ST7735_MAGENTA,ST7735_BLACK,force);
+		}
+		
+		
+		if(main_field == MAIN_OUT){
+			
+			ST7735_WriteString(0, 40,  "ON ", UI_FONT_SMALL, ST7735_GREEN, ST7735_BLACK);
+			// POWER
+			ST7735_WriteString(0, 70,  "  ", UI_FONT_SMALL, ST7735_BLACK, ST7735_BLACK);
+			
+			float power = ui->vout * ui->current;
+			if(power < 100.0f) FmtNumber(buf, power, 2);
+			else FmtNumber(buf, power, 1);
+			WriteCached(c_p,25, 60, 50,buf,UI_FONT_BIG,ST7735_MAGENTA,ST7735_BLACK,force);
+		}else if(main_field == MAIN_OUT_OFF)
+		{
+			ST7735_WriteString(0, 40,  "OFF", UI_FONT_SMALL, ST7735_RED, ST7735_BLACK);
+			ui->state = BBUI_STATE_OFF;
+		}
+		
+		
+		if(ui->state == BBUI_STATE_CV){
+			ST7735_WriteString(110, 0,  "CV", UI_FONT_SMALL, ST7735_YELLOW, ST7735_BLACK);
+			ST7735_WriteString(110, 30,  "  ", UI_FONT_SMALL, ST7735_BLACK, ST7735_BLACK);
+		}else if(ui->state == BBUI_STATE_CC){
+			ST7735_WriteString(110, 30,  "CC", UI_FONT_SMALL, ST7735_GREEN, ST7735_BLACK);
+			ST7735_WriteString(110, 0,  "  ", UI_FONT_SMALL, ST7735_BLACK, ST7735_BLACK);
+		}else {
+			ST7735_WriteString(110, 0,  "  ", UI_FONT_SMALL, ST7735_BLACK, ST7735_BLACK);
+			ST7735_WriteString(110, 30,  "  ", UI_FONT_SMALL, ST7735_BLACK, ST7735_BLACK);
+		}
+		
+		
+		FmtNumber(buf, ui->vin, 2);
+    WriteCached(c_vin,28, 91, 27, buf, UI_FONT_MEDIUM, ST7735_GREEN, ST7735_BLACK,force);
+		
+		
+		FmtNumber(buf, ui->iset, 2);
+    WriteCached(c_lim,37, 111, 27, buf, UI_FONT_MEDIUM, ST7735_GREEN, ST7735_BLACK,force);
+		
+		FmtNumber(buf, ui->temp, 1);
+    WriteCached(c_temp,98, 90, 27, buf, UI_FONT_SMALL, ST7735_RED, ST7735_BLACK,force);
+		
 }
-
-static void DrawMenuBase(void)
-{
-    DrawTitle("MAIN MENU");
-
-    ST7735_WriteString(18, 22, "SAVE PRESET", UI_FONT_SMALL, ST7735_WHITE, ST7735_BLACK);
-    ST7735_WriteString(18, 36, "BATTERY",     UI_FONT_SMALL, ST7735_WHITE, ST7735_BLACK);
-    ST7735_WriteString(18, 50, "MQTT",        UI_FONT_SMALL, ST7735_WHITE, ST7735_BLACK);
-    ST7735_WriteString(18, 64, "SYSTEM",      UI_FONT_SMALL, ST7735_WHITE, ST7735_BLACK);
-    ST7735_WriteString(18, 78, "BACK",        UI_FONT_SMALL, ST7735_WHITE, ST7735_BLACK);
-}
-
-static void UpdateMenu(uint8_t force)
-{
-    (void)force;
-    DrawListCursor(menu_index, MENU_COUNT);
-}
-
-static void DrawPresetBase(void)
-{
-    DrawTitle("SAVE PRESET");
-
-    ST7735_WriteString(18, 28, "SAVE M1", UI_FONT_SMALL, ST7735_GREEN, ST7735_BLACK);
-    ST7735_WriteString(18, 46, "SAVE M2", UI_FONT_SMALL, ST7735_BLUE, ST7735_BLACK);
-    ST7735_WriteString(18, 64, "SAVE M3", UI_FONT_SMALL, ST7735_MAGENTA, ST7735_BLACK);
-    ST7735_WriteString(18, 92, "BACK",    UI_FONT_SMALL, ST7735_WHITE, ST7735_BLACK);
-}
-
-static void UpdatePreset(uint8_t force)
-{
-    (void)force;
-    DrawListCursor(menu_index, PRESET_COUNT);
-}
-
-static void DrawBatteryBase(void)
-{
-    DrawTitle("BATTERY CHARGE");
-
-    ST7735_WriteString(18, 20, "1S  4.20V",  UI_FONT_SMALL, ST7735_WHITE, ST7735_BLACK);
-    ST7735_WriteString(18, 34, "2S  8.40V",  UI_FONT_SMALL, ST7735_WHITE, ST7735_BLACK);
-    ST7735_WriteString(18, 48, "3S 12.60V",  UI_FONT_SMALL, ST7735_WHITE, ST7735_BLACK);
-    ST7735_WriteString(18, 62, "4S 16.80V",  UI_FONT_SMALL, ST7735_WHITE, ST7735_BLACK);
-    ST7735_WriteString(18, 76, "5S 21.00V",  UI_FONT_SMALL, ST7735_WHITE, ST7735_BLACK);
-    ST7735_WriteString(18, 90, "6S 25.20V",  UI_FONT_SMALL, ST7735_WHITE, ST7735_BLACK);
-    ST7735_WriteString(18, 108, "BACK",      UI_FONT_SMALL, ST7735_WHITE, ST7735_BLACK);
-}
-
-static void UpdateBattery(uint8_t force)
-{
-    (void)force;
-
-    DrawListCursor(menu_index, BATT_COUNT);
-
-    char buf[12];
-    sprintf(buf, "%dS", ui->batt_cells);
-
-    ST7735_FillRectangle(130, 2, 28, 12, ST7735_BLACK);
-    ST7735_WriteString(130, 2, buf, UI_FONT_SMALL, ST7735_GREEN, ST7735_BLACK);
-}
-
-static void DrawMqttBase(void)
-{
-    DrawTitle("MQTT");
-
-    ST7735_WriteString(18, 34, "ENABLE", UI_FONT_SMALL, ST7735_WHITE, ST7735_BLACK);
-    ST7735_WriteString(18, 52, "BACK",   UI_FONT_SMALL, ST7735_WHITE, ST7735_BLACK);
-}
-
-static void UpdateMqtt(uint8_t force)
-{
-    (void)force;
-
-    DrawListCursor(menu_index, MQTT_COUNT);
-
-    ST7735_FillRectangle(82, 34, 50, 12, ST7735_BLACK);
-
-    if(ui->mqtt_enable)
-        ST7735_WriteString(82, 34, "ON", UI_FONT_SMALL, ST7735_GREEN, ST7735_BLACK);
-    else
-        ST7735_WriteString(82, 34, "OFF", UI_FONT_SMALL, ST7735_RED, ST7735_BLACK);
-}
-
-static void DrawSystemBase(void)
-{
-    DrawTitle("SYSTEM");
-
-    ST7735_WriteString(18, 24, "SAVE FLASH", UI_FONT_SMALL, ST7735_WHITE, ST7735_BLACK);
-    ST7735_WriteString(18, 42, "LOAD FLASH", UI_FONT_SMALL, ST7735_WHITE, ST7735_BLACK);
-    ST7735_WriteString(18, 60, "DEFAULT",    UI_FONT_SMALL, ST7735_WHITE, ST7735_BLACK);
-    ST7735_WriteString(18, 88, "BACK",       UI_FONT_SMALL, ST7735_WHITE, ST7735_BLACK);
-}
-
-static void UpdateSystem(uint8_t force)
-{
-    (void)force;
-    DrawListCursor(menu_index, SYSTEM_COUNT);
-}
-
-static void DrawEditBase(const char *title)
-{
-    DrawTitle(title);
-    ST7735_WriteString(8, 104, "ROTATE:ADJ PRESS:OK", UI_FONT_SMALL, ST7735_BLUE, ST7735_BLACK);
-}
-
-static void UpdateEditVoltage(uint8_t force)
-{
-    char buf[24];
-
-    FmtFloat(buf, edit_value, 2, "V");
-
-    WriteCached(c_u,
-                28, 48, 120,
-                buf,
-                UI_FONT_MEDIUM,
-                ST7735_CYAN,
-                ST7735_BLACK,
-                force);
-}
-
-static void UpdateEditCurrent(uint8_t force)
-{
-    char buf[24];
-
-    FmtFloat(buf, edit_value, 2, "A");
-
-    WriteCached(c_i,
-                28, 48, 120,
-                buf,
-                UI_FONT_MEDIUM,
-                ST7735_YELLOW,
-                ST7735_BLACK,
-                force);
-}
-
-static uint8_t PageCount(void)
-{
-    switch(page)
-    {
-        case UI_PAGE_MENU:    return MENU_COUNT;
-        case UI_PAGE_PRESET:  return PRESET_COUNT;
-        case UI_PAGE_BATTERY: return BATT_COUNT;
-        case UI_PAGE_MQTT:    return MQTT_COUNT;
-        case UI_PAGE_SYSTEM:  return SYSTEM_COUNT;
-        default:              return 0;
-    }
-}
-
 static void EncoderMainAdjust(int8_t dir)
 {
-    if(ui == 0 || dir == 0)
-        return;
+//    if(ui == 0 || dir == 0)
+//        return;
 
     if(main_field == MAIN_VSET)
     {
@@ -765,84 +487,57 @@ static void EncoderMainAdjust(int8_t dir)
         ui->iset = clampf(ui->iset, ISET_MIN, ISET_MAX);
         ClearCache();
     }
-    else if(main_field == MAIN_PRESET)
-    {
-        uint8_t id = ui->active_preset;
-
-        if(dir > 0)
-            id = (id + 1) % 3;
-        else
-            id = (id == 0) ? 2 : id - 1;
-
-        LoadPreset(id);
-    }
-    else if(main_field == MAIN_OUT)
-    {
-        if(dir > 0)
-        {
-            ui->enable = 1;
-
-            if(ui->state == BBUI_STATE_OFF)
-                ui->state = BBUI_STATE_CV;
-        }
-        else
-        {
-            ui->enable = 0;
-            ui->state = BBUI_STATE_OFF;
-        }
-
-        ClearCache();
-    }
-
+   
+		ClearCache();
     dirty = 1;
 }
 
 static void EncoderMove(int8_t dir)
 {
-    if(ui == 0 || dir == 0)
-        return;
+//    if(ui == 0 || dir == 0)
+//        return;
+		EncoderMainAdjust(dir);
+//    if(page == UI_PAGE_MAIN)
+//    {
+//        
+//        return;
+//    }
 
-    if(page == UI_PAGE_MAIN)
-    {
-        EncoderMainAdjust(dir);
-        return;
-    }
+//    if(page == UI_PAGE_EDIT_V)
+//    {
+//        edit_value += dir * VSET_STEP;
+//        edit_value = clampf(edit_value, VSET_MIN, VSET_MAX);
+//        dirty = 1;
+//        return;
+//    }
 
-    if(page == UI_PAGE_EDIT_V)
-    {
-        edit_value += dir * VSET_STEP;
-        edit_value = clampf(edit_value, VSET_MIN, VSET_MAX);
-        dirty = 1;
-        return;
-    }
+//    if(page == UI_PAGE_EDIT_I)
+//    {
+//        edit_value += dir * ISET_STEP;
+//        edit_value = clampf(edit_value, ISET_MIN, ISET_MAX);
+//        dirty = 1;
+//        return;
+//    }
 
-    if(page == UI_PAGE_EDIT_I)
-    {
-        edit_value += dir * ISET_STEP;
-        edit_value = clampf(edit_value, ISET_MIN, ISET_MAX);
-        dirty = 1;
-        return;
-    }
+//    uint8_t count = PageCount();
 
-    uint8_t count = PageCount();
+//    if(count == 0)
+//        return;
 
-    if(count == 0)
-        return;
+//    if(dir > 0)
+//    {
+//        menu_index++;
 
-    if(dir > 0)
-    {
-        menu_index++;
-
-        if(menu_index >= count)
-            menu_index = 0;
-    }
-    else
-    {
-        if(menu_index == 0)
-            menu_index = count - 1;
-        else
-            menu_index--;
-    }
+//        if(menu_index >= count)
+//            menu_index = 0;
+//    }
+//    else
+//    {
+//        if(menu_index == 0)
+//            menu_index = count - 1;
+//        else
+//            menu_index--;
+//    }
 
     dirty = 1;
 }
@@ -870,151 +565,65 @@ static void EncoderTask(void)
         EncoderMove(-1);
     }
 }
-
-static void HandleShortPress(void)
+void handleButton()
 {
-    if(ui == 0)
-        return;
-
-    if(page == UI_PAGE_MAIN)
+	if(!HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_9)){
+		HAL_Delay(30);
+		while(!HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_9));
+		force_redraw = 1;
+		if( main_field == MAIN_VSET) main_field = MAIN_OUT_OFF;
+		else main_field = MAIN_VSET;
+	}else if(!HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_8)){
+		HAL_Delay(30);
+		while(!HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_8));
+		ui_state = SET_CURRENT;
+		force_redraw = 1;
+		if( main_field == MAIN_ISET) main_field = MAIN_OUT_OFF;
+		else main_field = MAIN_ISET;
+	}else if(!HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_7)){
+		HAL_Delay(30);
+		while(!HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_7));
+		force_redraw = 1;
+		if( main_field == MAIN_OUT) main_field = MAIN_OUT_OFF;
+		else main_field = MAIN_OUT;
+	}else if(!HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_6)){
+		HAL_Delay(30);
+		while(!HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_6));
+		force_redraw = 1;
+		
+	}
+	
+}
+void handleUI()
+{
+		EncoderTask();
+		handleButton();
+	
+	if(main_field == MAIN_OUT)
     {
-        main_field++;
-
-        if(main_field >= MAIN_COUNT)
-            main_field = MAIN_VSET;
-
-        ClearCache();
-        dirty = 1;
-        return;
-    }
-
-    if(page == UI_PAGE_MENU)
+            ui->enable = 1;
+						//ui->state = BBUI_STATE_CV;
+			
+		}
+    else if(main_field == MAIN_OUT_OFF)
+		{
+				ui->enable = 0;
+				ui->state = BBUI_STATE_OFF;
+		}
+    if(force_redraw || dirty)
     {
-        if(menu_index == MENU_PRESET)
-            ChangePage(UI_PAGE_PRESET);
-        else if(menu_index == MENU_BATTERY)
-            ChangePage(UI_PAGE_BATTERY);
-        else if(menu_index == MENU_MQTT)
-            ChangePage(UI_PAGE_MQTT);
-        else if(menu_index == MENU_SYSTEM)
-            ChangePage(UI_PAGE_SYSTEM);
-        else if(menu_index == MENU_BACK)
-            ChangePage(UI_PAGE_MAIN);
-
-        return;
-    }
-
-    if(page == UI_PAGE_PRESET)
+        force_redraw = 0;
+        dirty = 0;
+        
+		}
+		if(HAL_GetTick() - t_lcd >= UI_LCD_PERIOD_MS)
     {
-        if(menu_index == PRESET_SAVE_M1)
-        {
-            SavePreset(0);
-            BBUI_SaveToFlash();
-        }
-        else if(menu_index == PRESET_SAVE_M2)
-        {
-            SavePreset(1);
-            BBUI_SaveToFlash();
-        }
-        else if(menu_index == PRESET_SAVE_M3)
-        {
-            SavePreset(2);
-            BBUI_SaveToFlash();
-        }
-        else if(menu_index == PRESET_BACK)
-        {
-            ChangePage(UI_PAGE_MENU);
-            return;
-        }
-
-        dirty = 1;
-        return;
-    }
-
-    if(page == UI_PAGE_BATTERY)
-    {
-        if(menu_index <= BATT_6S)
-        {
-            SelectBattery(menu_index + 1);
-            BBUI_SaveToFlash();
-            dirty = 1;
-        }
-        else
-        {
-            ChangePage(UI_PAGE_MENU);
-        }
-
-        return;
-    }
-
-    if(page == UI_PAGE_MQTT)
-    {
-        if(menu_index == MQTT_ENABLE)
-        {
-            ui->mqtt_enable = !ui->mqtt_enable;
-            BBUI_SaveToFlash();
-            dirty = 1;
-        }
-        else
-        {
-            ChangePage(UI_PAGE_MENU);
-        }
-
-        return;
-    }
-
-    if(page == UI_PAGE_SYSTEM)
-    {
-        if(menu_index == SYSTEM_SAVE_FLASH)
-        {
-            BBUI_SaveToFlash();
-            dirty = 1;
-        }
-        else if(menu_index == SYSTEM_LOAD_FLASH)
-        {
-            BBUI_LoadFromFlash();
-            dirty = 1;
-        }
-        else if(menu_index == SYSTEM_DEFAULT)
-        {
-            SetDefaultConfig();
-            BBUI_SaveToFlash();
-            dirty = 1;
-        }
-        else if(menu_index == SYSTEM_BACK)
-        {
-            ChangePage(UI_PAGE_MENU);
-        }
-
-        return;
-    }
-
-    if(page == UI_PAGE_EDIT_V)
-    {
-        ui->vset = edit_value;
-        ChangePage(prev_page);
-        return;
-    }
-
-    if(page == UI_PAGE_EDIT_I)
-    {
-        ui->iset = edit_value;
-        ChangePage(prev_page);
-        return;
-    }
+        t_lcd = HAL_GetTick();
+        dirty = 0;
+				UpdateMain(1);
+		}
 }
 
-static void HandleLongPress(void)
-{
-    if(page == UI_PAGE_MAIN)
-    {
-        ChangePage(UI_PAGE_MENU);
-    }
-    else
-    {
-        ChangePage(UI_PAGE_MAIN);
-    }
-}
 
 #if UI_USE_POLLING_BUTTON
 static void ButtonTask(void)
@@ -1044,7 +653,7 @@ static void ButtonTask(void)
             if(btn_long_done == 0 && now - btn_down_tick >= UI_BTN_LONG_MS)
             {
                 btn_long_done = 1;
-                HandleLongPress();
+//                HandleLongPress();
             }
         }
     }
@@ -1054,8 +663,8 @@ static void ButtonTask(void)
         {
             btn_pressed = 0;
 
-            if(btn_long_done == 0)
-                HandleShortPress();
+//            if(btn_long_done == 0)
+//                HandleShortPress();
         }
     }
 }
@@ -1100,117 +709,118 @@ void BBUI_Init(BBUI_Data_t *data, TIM_HandleTypeDef *htim_encoder)
 
     force_redraw = 1;
     dirty = 1;
+		DrawMainBase();
 }
 
-void BBUI_Task(void)
-{
-#if UI_USE_POLLING_BUTTON
-    ButtonTask();
-#endif
+//void BBUI_Task(void)
+//{
+//#if UI_USE_POLLING_BUTTON
+//    ButtonTask();
+//#endif
 
-    EncoderTask();
+//    EncoderTask();
 
-    if(force_redraw)
-    {
-        force_redraw = 0;
-        dirty = 0;
+//    if(force_redraw)
+//    {
+//        force_redraw = 0;
+//        dirty = 0;
 
-        switch(page)
-        {
-            case UI_PAGE_MAIN:
-                DrawMainBase();
-                UpdateMain(1);
-                break;
+//        switch(page)
+//        {
+//            case UI_PAGE_MAIN:
+//                DrawMainBase();
+//                UpdateMain(1);
+//                break;
 
-            case UI_PAGE_MENU:
-                DrawMenuBase();
-                UpdateMenu(1);
-                break;
+//            case UI_PAGE_MENU:
+//                DrawMenuBase();
+//                UpdateMenu(1);
+//                break;
 
-            case UI_PAGE_PRESET:
-                DrawPresetBase();
-                UpdatePreset(1);
-                break;
+//            case UI_PAGE_PRESET:
+//                DrawPresetBase();
+//                UpdatePreset(1);
+//                break;
 
-            case UI_PAGE_BATTERY:
-                DrawBatteryBase();
-                UpdateBattery(1);
-                break;
+//            case UI_PAGE_BATTERY:
+//                DrawBatteryBase();
+//                UpdateBattery(1);
+//                break;
 
-            case UI_PAGE_MQTT:
-                DrawMqttBase();
-                UpdateMqtt(1);
-                break;
+//            case UI_PAGE_MQTT:
+//                DrawMqttBase();
+//                UpdateMqtt(1);
+//                break;
 
-            case UI_PAGE_SYSTEM:
-                DrawSystemBase();
-                UpdateSystem(1);
-                break;
+//            case UI_PAGE_SYSTEM:
+//                DrawSystemBase();
+//                UpdateSystem(1);
+//                break;
 
-            case UI_PAGE_EDIT_V:
-                DrawEditBase("EDIT VSET");
-                UpdateEditVoltage(1);
-                break;
+//            case UI_PAGE_EDIT_V:
+//                DrawEditBase("EDIT VSET");
+//                UpdateEditVoltage(1);
+//                break;
 
-            case UI_PAGE_EDIT_I:
-                DrawEditBase("EDIT ILIM");
-                UpdateEditCurrent(1);
-                break;
+//            case UI_PAGE_EDIT_I:
+//                DrawEditBase("EDIT ILIM");
+//                UpdateEditCurrent(1);
+//                break;
 
-            default:
-                DrawMainBase();
-                UpdateMain(1);
-                break;
-        }
+//            default:
+//                DrawMainBase();
+//                UpdateMain(1);
+//                break;
+//        }
 
-        return;
-    }
+//        return;
+//    }
 
-    if(dirty || HAL_GetTick() - t_lcd >= UI_LCD_PERIOD_MS)
-    {
-        t_lcd = HAL_GetTick();
-        dirty = 0;
+//    if(dirty || HAL_GetTick() - t_lcd >= UI_LCD_PERIOD_MS)
+//    {
+//        t_lcd = HAL_GetTick();
+//        dirty = 0;
 
-        switch(page)
-        {
-            case UI_PAGE_MAIN:
-                UpdateMain(0);
-                break;
+//        switch(page)
+//        {
+//            case UI_PAGE_MAIN:
+//                UpdateMain(0);
+//                break;
 
-            case UI_PAGE_MENU:
-                UpdateMenu(0);
-                break;
+//            case UI_PAGE_MENU:
+//                UpdateMenu(0);
+//                break;
 
-            case UI_PAGE_PRESET:
-                UpdatePreset(0);
-                break;
+//            case UI_PAGE_PRESET:
+//                UpdatePreset(0);
+//                break;
 
-            case UI_PAGE_BATTERY:
-                UpdateBattery(0);
-                break;
+//            case UI_PAGE_BATTERY:
+//                UpdateBattery(0);
+//                break;
 
-            case UI_PAGE_MQTT:
-                UpdateMqtt(0);
-                break;
+//            case UI_PAGE_MQTT:
+//                UpdateMqtt(0);
+//                break;
 
-            case UI_PAGE_SYSTEM:
-                UpdateSystem(0);
-                break;
+//            case UI_PAGE_SYSTEM:
+//                UpdateSystem(0);
+//                break;
 
-            case UI_PAGE_EDIT_V:
-                UpdateEditVoltage(0);
-                break;
+//            case UI_PAGE_EDIT_V:
+//                UpdateEditVoltage(0);
+//                break;
 
-            case UI_PAGE_EDIT_I:
-                UpdateEditCurrent(0);
-                break;
+//            case UI_PAGE_EDIT_I:
+//                UpdateEditCurrent(0);
+//                break;
 
-            default:
-                UpdateMain(0);
-                break;
-        }
-    }
-}
+//            default:
+//                UpdateMain(0);
+//                break;
+//        }
+//    }
+//}
 
 void BBUI_ButtonIRQ(void)
 {

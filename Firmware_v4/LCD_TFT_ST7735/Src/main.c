@@ -29,6 +29,7 @@
 #include <stdio.h>
 #include <math.h>
 #include "UI.h"
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -137,7 +138,7 @@ static void MX_TIM3_Init(void);
 #define SWITCH_PORT GPIOB
 static float cv_i = 0.0f;
 static float cc_i = 0.0f;
-
+extern UI_MainField_t main_field;
 static float vref_soft = 0.0f;
 static float ratio_out = 0.5f;
 typedef enum
@@ -364,7 +365,6 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
     static uint32_t last_press = 0;
-
 //    if(GPIO_Pin == GPIO_PIN_4)
 //    {
 
@@ -728,6 +728,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
             the HAL_TIM_PeriodElapsedCallback could be implemented in the user file
    */
 }
+
 /* USER CODE END 0 */
 
 /**
@@ -782,9 +783,9 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-		BBUI_Task();
+		handleUI();
 		handle_temp();
-		
+
   }
   /* USER CODE END 3 */
 }
@@ -1016,7 +1017,7 @@ static void MX_TIM1_Init(void)
 
   /* USER CODE END TIM1_Init 1 */
   htim1.Instance = TIM1;
-  htim1.Init.Prescaler = 3;
+  htim1.Init.Prescaler = 2;
   htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim1.Init.Period = 1000;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
@@ -1067,7 +1068,7 @@ static void MX_TIM1_Init(void)
   sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
   sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
   sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
-  sBreakDeadTimeConfig.DeadTime = 25;
+  sBreakDeadTimeConfig.DeadTime = 50;
   sBreakDeadTimeConfig.BreakState = TIM_BREAK_DISABLE;
   sBreakDeadTimeConfig.BreakPolarity = TIM_BREAKPOLARITY_HIGH;
   sBreakDeadTimeConfig.AutomaticOutput = TIM_AUTOMATICOUTPUT_DISABLE;
@@ -1256,13 +1257,9 @@ static void MX_GPIO_Init(void)
                            PB9 */
   GPIO_InitStruct.Pin = GPIO_PIN_4|GPIO_PIN_6|GPIO_PIN_7|GPIO_PIN_8
                           |GPIO_PIN_9;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
-  /* EXTI interrupt init*/
-  HAL_NVIC_SetPriority(EXTI4_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(EXTI4_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 

@@ -400,6 +400,16 @@
               <FileType>5</FileType>
               <FilePath>..\Inc\ui.h</FilePath>
             </File>
+            <File>
+              <FileName>UI_Solider.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Inc\UI_Solider.h</FilePath>
+            </File>
+            <File>
+              <FileName>UI_Solider.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Src\UI_Solider.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

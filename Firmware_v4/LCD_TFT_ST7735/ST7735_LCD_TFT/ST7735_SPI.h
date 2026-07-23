@@ -32,14 +32,14 @@
 /*** Redefine if necessary ***/
 // Type LCD define
 // AliExpress/eBay 1.8" display, default orientation
-/*
+
 #define ST7735_IS_160X128 1
 #define ST7735_WIDTH  128
 #define ST7735_HEIGHT 160
 #define ST7735_XSTART 0
 #define ST7735_YSTART 0
 #define ST7735_ROTATION (ST7735_MADCTL_MX | ST7735_MADCTL_MY)
-*/
+
 
 // AliExpress/eBay 1.8" display, rotate right
 /*
@@ -120,12 +120,20 @@
 
 // 1.44" display, rotate right
 
-#define ST7735_IS_128X128 1
-#define ST7735_WIDTH  128
-#define ST7735_HEIGHT 128
-#define ST7735_XSTART 3
-#define ST7735_YSTART 2
-#define ST7735_ROTATION (ST7735_MADCTL_MY | ST7735_MADCTL_MV | ST7735_MADCTL_BGR)
+
+
+
+
+//#define ST7735_IS_128X128 1
+//#define ST7735_WIDTH  128
+//#define ST7735_HEIGHT 128
+//#define ST7735_XSTART 3
+//#define ST7735_YSTART 2
+//#define ST7735_ROTATION (ST7735_MADCTL_MY | ST7735_MADCTL_MV | ST7735_MADCTL_BGR)
+
+
+
+
 
 
 // 1.44" display, rotate left

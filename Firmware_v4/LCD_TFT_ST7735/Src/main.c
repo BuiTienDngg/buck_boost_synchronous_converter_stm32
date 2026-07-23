@@ -29,7 +29,7 @@
 #include <stdio.h>
 #include <math.h>
 #include "UI.h"
-
+#include "UI_Solider.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -728,7 +728,77 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
             the HAL_TIM_PeriodElapsedCallback could be implemented in the user file
    */
 }
+void Test_UI_Solider_SetData_Task(void)
+{
+    static uint8_t init = 0;
+    static uint32_t last_tick = 0;
 
+    static float tip_temp = 25.0f;
+    static float current = 0.0f;
+    static float fet_temp = 30.0f;
+    static float power = 0.0f;
+
+    if(init == 0)
+    {
+        init = 1;
+        UI_Solider_Enter();
+    }
+
+    if(HAL_GetTick() - last_tick < 100)
+        return;
+
+    last_tick = HAL_GetTick();
+
+    float set_temp = UI_Solider_GetSetTemp();
+
+    if(tip_temp < set_temp)
+    {
+        float err = set_temp - tip_temp;
+
+        if(err > 80.0f)
+            tip_temp += 6.0f;
+        else if(err > 30.0f)
+            tip_temp += 3.0f;
+        else if(err > 5.0f)
+            tip_temp += 1.0f;
+        else
+            tip_temp += 0.2f;
+    }
+    else
+    {
+        tip_temp -= 0.3f;
+    }
+
+    if(tip_temp < 25.0f)
+        tip_temp = 25.0f;
+
+    float err_abs = set_temp - tip_temp;
+
+    if(err_abs < 0.0f)
+        err_abs = -err_abs;
+
+    if(err_abs > 80.0f)
+        current = 4.5f;
+    else if(err_abs > 40.0f)
+        current = 3.2f;
+    else if(err_abs > 15.0f)
+        current = 1.8f;
+    else if(err_abs > 5.0f)
+        current = 0.8f;
+    else
+        current = 0.25f;
+
+    fet_temp = fet_temp * 0.98f + (30.0f + current * 12.0f) * 0.02f;
+
+    power = current * 24.0f;
+
+    UI_Solider_SetData(tip_temp,
+                       current,
+                       fet_temp,
+                       power);
+
+    UI_Solider_Task(0);
+}
 /* USER CODE END 0 */
 
 /**
@@ -783,9 +853,10 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+		
+		Test_UI_Solider_SetData_Task();
 		handleUI();
 		handle_temp();
-
   }
   /* USER CODE END 3 */
 }

@@ -1,6 +1,7 @@
 --cpu Cortex-M3
 "st7735\startup_stm32f103xb.o"
 "st7735\ui.o"
+"st7735\ui_solider.o"
 "st7735\st7735_spi.o"
 "st7735\fonts.o"
 "st7735\main.o"

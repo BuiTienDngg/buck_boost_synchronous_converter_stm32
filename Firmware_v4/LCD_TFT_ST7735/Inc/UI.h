@@ -55,4 +55,11 @@ void BBUI_ForceRefresh(void);
 void BBUI_LoadFromFlash(void);
 void BBUI_SaveToFlash(void);
 void handleUI(void);
+void BBUI_SolderSetData(float tip_temp,
+                        float iron_current,
+                        float fet_temp,
+                        float power);
+
+float BBUI_SolderGetSetTemp(void);
+uint8_t BBUI_IsSolderScreen(void);
 #endif

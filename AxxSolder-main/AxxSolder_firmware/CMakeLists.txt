@@ -1,0 +1,93 @@
+#Inspired by https://github.com/jasonyang-ee/STM32-CMAKE-TEMPLATE
+cmake_minimum_required(VERSION 3.29)
+
+list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
+set(CMAKE_C_STANDARD                11)
+set(CMAKE_C_STANDARD_REQUIRED       ON)
+set(CMAKE_C_EXTENSIONS              ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS   ON)
+set(CMAKE_TOOLCHAIN_FILE            gcc-arm-none-eabi)
+project(AxxSolder C ASM)
+set(linker_script_SRC               ${CMAKE_SOURCE_DIR}/STM32G431CBTX_FLASH.ld)
+set(EXECUTABLE                      ${CMAKE_PROJECT_NAME})
+
+file(GLOB source_list
+    ${CMAKE_SOURCE_DIR}/Core/Src/*.c
+    ${CMAKE_SOURCE_DIR}/Drivers/STM32G4xx_HAL_Driver/Src/*.c
+    ${CMAKE_SOURCE_DIR}/Drivers/LCD/*.c
+    ${CMAKE_SOURCE_DIR}/Drivers/UGUI/*.c
+    ${CMAKE_SOURCE_DIR}/Drivers/UGUI/Fonts/*.c
+)
+
+set(include_list ${include_list}
+    ${CMAKE_SOURCE_DIR}/Core/Inc
+    ${CMAKE_SOURCE_DIR}/Drivers/LCD
+    ${CMAKE_SOURCE_DIR}/Drivers/UGUI
+    ${CMAKE_SOURCE_DIR}/Drivers/CMSIS/Device/ST/STM32G4xx/Include
+    ${CMAKE_SOURCE_DIR}/Drivers/CMSIS/Include
+    ${CMAKE_SOURCE_DIR}/Drivers/STM32G4xx_HAL_Driver/Inc
+    ${CMAKE_SOURCE_DIR}/Drivers/STM32G4xx_HAL_Driver/Inc/Legacy
+)
+
+add_executable(${EXECUTABLE} ${source_list} ${CMAKE_SOURCE_DIR}/Core/Startup/startup_stm32g431cbtx.s)
+
+target_include_directories(${EXECUTABLE} PRIVATE ${include_list})
+
+# LCD options — defaults match current hardware (ST7789, 240×320, rotation 2)
+set(LCD_CONTROLLER "ST7789"  CACHE STRING "LCD controller (ST7789 or ST7735)")
+set(LCD_SIZE       "240X320" CACHE STRING "LCD panel size: 240X320 240X280 240X240 135X240 160X128 128X128 160X80")
+set(LCD_ROTATION   "2"       CACHE STRING "Default LCD rotation 0-3")
+
+# Storage driver selection (FLASH, EEPROM, SDCARD)
+set(STORAGE_PROFILES "FLASH" CACHE STRING "Storage driver for tip profiles: FLASH, EEPROM, SDCARD")
+set(STORAGE_SETTINGS "FLASH" CACHE STRING "Storage driver for settings: FLASH, EEPROM, SDCARD")
+
+target_compile_definitions(${EXECUTABLE} PRIVATE
+    "USE_HAL_DRIVER"
+    "STM32G431xx"
+    "USE_${LCD_CONTROLLER}"
+    "LCD_${LCD_SIZE}"
+    "LCD_ROTATION=${LCD_ROTATION}"
+    "STORAGE_PROFILES_${STORAGE_PROFILES}"
+    "STORAGE_SETTINGS_${STORAGE_SETTINGS}"
+)
+
+set(CPU_PARAMETERS ${CPU_PARAMETERS}
+	-mthumb
+	-mcpu=cortex-m4
+	-mfpu=fpv4-sp-d16
+	-mfloat-abi=hard
+)
+
+target_compile_options(${EXECUTABLE} PRIVATE
+    ${CPU_PARAMETERS}
+	-Os
+	-Wall
+	-Wpedantic
+	-Wno-unused-parameter
+	-Wdouble-promotion
+)
+
+target_link_options(${EXECUTABLE} PRIVATE
+	-T${linker_script_SRC}
+	${CPU_PARAMETERS}
+	-Wl,-Map=${CMAKE_PROJECT_NAME}.map
+	--specs=nosys.specs
+	-Wl,--start-group
+	-lc
+	-lm
+	-Wl,--end-group
+	-Wl,--print-memory-usage
+)
+
+add_custom_command(TARGET ${EXECUTABLE} POST_BUILD
+	COMMAND ${CMAKE_SIZE} $<TARGET_FILE:${EXECUTABLE}>
+)
+
+add_custom_command(TARGET ${EXECUTABLE} POST_BUILD
+	COMMAND ${CMAKE_OBJCOPY} -O ihex $<TARGET_FILE:${EXECUTABLE}> ${EXECUTABLE}.hex
+)
+
+add_custom_command(TARGET ${EXECUTABLE} POST_BUILD
+	COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:${EXECUTABLE}> ${EXECUTABLE}.bin
+)

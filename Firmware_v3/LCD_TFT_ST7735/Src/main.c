@@ -308,7 +308,7 @@ uint16_t adc_offset = 0;
 static float Read_Current(uint16_t adc_current)
 {
     float v_adc = (adc_current - adc_offset) * 3.3f / 4095.0f;
-    float current = (v_adc) / CURRENT_GAIN / SHUNT_R + 0.32f;
+    float current = (v_adc) / CURRENT_GAIN / SHUNT_R + 0.32f                     ;
     if(current < 0.0f)
         current = 0.0f;
     return current;

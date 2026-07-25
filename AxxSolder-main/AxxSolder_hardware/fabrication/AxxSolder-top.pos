@@ -1,0 +1,16 @@
+### Footprint positions - created on 2025-11-17T07:49:07-0500 ###
+### Printed by KiCad version 9.0.6
+## Unit = mm, Angle = deg.
+## Side : top
+# Ref     Val                 Package                    PosX       PosY       Rot  Side
+J5        TSW-102-07-T-S      TSW-102-XX-YY-S        -37.7500    77.0750  -90.0000  top
+J6        TSW-102-07-T-S      TSW-102-XX-YY-S         -1.2500    77.0750  -90.0000  top
+J7        TSW-108-07-T-S      TSW-108-XX-YY-S        -29.6600    25.9200    0.0000  top
+S1        ADTSM644RVTR        ADTSM644RVTR           -29.7500    14.6000  -90.0000  top
+S2        ADTSM644RVTR        ADTSM644RVTR           -15.7500    14.6000  -90.0000  top
+S3        ADTSM644RVTR        ADTSM644RVTR            -3.7500    14.6000  -90.0000  top
+TFT1      ~                   Adafruit_240x320_TFT   -19.4800    23.3600    0.0000  top
+TP13      DIAG_TP             TSW-101-XX-YY-S        -37.5000    25.4500    0.0000  top
+TP18      DIAG_TP             TSW-101-XX-YY-S         -9.3400    25.9200    0.0000  top
+U2        PEC11J-9215F-S0015  PEC11J9215FS0015       -29.7500    14.6000    0.0000  top
+## End

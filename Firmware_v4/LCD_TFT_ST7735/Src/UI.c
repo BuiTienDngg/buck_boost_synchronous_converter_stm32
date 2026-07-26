@@ -51,6 +51,9 @@
 #define POWER_DEADBAND             0.3f
 
 #define DISP_ALPHA                 0.25f
+
+#define SWITCH_PIN GPIO_PIN_5
+#define SWITCH_PORT GPIOB
 typedef enum
 {
     UI_SCREEN_POWER = 0,
@@ -1018,12 +1021,14 @@ static void ButtonTask(void)
 						UI_Solider_Exit();
 						force_redraw = 1;
 						dirty = 1;
+					HAL_GPIO_WritePin(SWITCH_PORT, SWITCH_PIN, 1);
 				}
 				else
 				{
 						UI_Solider_Enter();
 						force_redraw = 1;
 						dirty = 1;
+					HAL_GPIO_WritePin(SWITCH_PORT, SWITCH_PIN, 0);
 				}
 		}
 		if(ButtonPressedEvent(&btn_enc))

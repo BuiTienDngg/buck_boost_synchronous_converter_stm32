@@ -215,7 +215,7 @@ static volatile uint8_t ui_full_redraw = 1;
 static volatile uint8_t ui_need_update = 1;
 
 static volatile uint16_t adc_current_raw = 0;
-static volatile uint8_t adc_current_ready = 0;
+volatile uint8_t adc_current_ready = 0;
 
 static int16_t enc_last = 0;
 static int32_t enc_acc = 0;
@@ -223,11 +223,13 @@ static int32_t enc_acc = 0;
 static uint32_t t_adc = 0;
 static uint32_t t_lcd = 0;
 static uint8_t PowerStage_pwm_running = 0;
-#define ADC1_DMA_LEN 3
+#define ADC1_DMA_LEN 4
 
-static uint16_t adc1_dma_buf[ADC1_DMA_LEN];
-
-static volatile uint8_t adc1_dma_ready = 0;
+uint16_t adc1_dma_buf[ADC1_DMA_LEN];
+uint8_t adc1_dma_ready = 0;
+static uint16_t timeIntervalReadSolider = 0;
+int loopReadSolider_temp = 10;
+static uint16_t solider_temp_sum = 0;
 static void fmt_float(char *buf, float value, uint8_t dec, const char *unit)
 {
     int32_t scale = 1;
@@ -290,7 +292,7 @@ static float Read_Vin(uint16_t adc_vin)
 uint16_t raw = 0;
 static float Read_NTC_Temp(void)
 {
-    //raw = ADC_Read_Channel(&hadc2, ADC_CHANNEL_2);
+    raw = ADC_Read_Channel(&hadc2, ADC_CHANNEL_2);
 
     float v = raw * 3.3f / 4095.0f;
 
@@ -327,9 +329,6 @@ static float Read_Current_linear(uint16_t adc)
 
     return current;
 }
-
-// 14.57  
-static uint16_t adc1_dma_buf[ADC1_DMA_LEN];
 
 static uint32_t adc_sum[ADC1_DMA_LEN] = {0};
 static uint16_t adc_avg[ADC1_DMA_LEN] = {0};
@@ -636,7 +635,6 @@ void Buck_UI_Init(void)
 		
     HAL_TIM_Base_Start_IT(&htim3);
 		while(!adc_calib_offset);
-    adc_offset = adc_avg[2];
 }
 uint32_t lastTime_readTemp = 0;
 void handle_temp(){
@@ -660,7 +658,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
   /* Prevent unused argument(s) compilation warning */
   UNUSED(htim);
-	float vin_new = Read_Vin(adc_avg[2]);
+	float vin_new = Read_Vin(adc_avg[3]);
 	float vout_new = Read_Vout(adc_avg[0]);
 	float current_new = Read_Current(adc_avg[1]);
 	PowerStage.vin = PowerStage.vin * 0.9f + vin_new * 0.1f;
@@ -783,7 +781,7 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
     {
         adc_sum[0] += adc1_dma_buf[0];
         adc_sum[1] += adc1_dma_buf[1];
-        adc_sum[2] += adc1_dma_buf[2];
+        adc_sum[3] += adc1_dma_buf[3];
 
         adc_sample_cnt++;
 
@@ -791,11 +789,11 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
         {
             adc_avg[0] = adc_sum[0] / ADC_AVG_SAMPLES;
             adc_avg[1] = adc_sum[1] / ADC_AVG_SAMPLES;
-            adc_avg[2] = adc_sum[2] / ADC_AVG_SAMPLES;
+            adc_avg[3] = adc_sum[3] / ADC_AVG_SAMPLES;
 
             adc_sum[0] = 0;
             adc_sum[1] = 0;
-            adc_sum[2] = 0;
+            adc_sum[3] = 0;
 
             adc_sample_cnt = 0;
             adc1_dma_ready = 1;
@@ -859,12 +857,7 @@ int main(void)
 	PowerStage_Start();
 //	HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_3);
 //	TIM1 -> CCR3 = 100;
-	HAL_ADC_Start_IT(&hadc2);
 	HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
-	HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_4);
-	TIM3 -> CCR2 = 200;
-	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
-	HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_3);
 	
   /* USER CODE END 2 */
 
@@ -873,30 +866,20 @@ int main(void)
   while (1)
   {
     /* USER CODE END WHILE */
-
+		
     /* USER CODE BEGIN 3 */
-		
-//		for (int i = 100 ; i< 900; i++)
-//		{
-//			TIM3 -> CCR2 = 500;
-//			HAL_Delay(5);
-//			
-//		}
-		
-		if(solider_temp < 1230)
-		{
-			
-			TIM3 -> CCR2 = 600;
-		}else 
-		{
-			TIM3 -> CCR2 = 150;
-		}
-			UI_Solider_SetData(solider_temp / 3,
-                       PowerStage.current,
-                       40,
-                       PowerStage.current * PowerStage.vout);
-			handleUI();
-			handle_temp();
+		if(UI_Solider_IsActive())
+    {
+        Solider_PID_Enable(1);
+        Solider_PID_Task(600.0f);
+    }
+    else
+    {
+        Solider_PID_Enable(0);
+    }
+
+    BBUI_Task();
+		handle_temp();
   }
   /* USER CODE END 3 */
 }
@@ -974,7 +957,7 @@ static void MX_ADC1_Init(void)
   hadc1.Init.DiscontinuousConvMode = DISABLE;
   hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
   hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
-  hadc1.Init.NbrOfConversion = 3;
+  hadc1.Init.NbrOfConversion = 4;
   if (HAL_ADC_Init(&hadc1) != HAL_OK)
   {
     Error_Handler();
@@ -1001,8 +984,17 @@ static void MX_ADC1_Init(void)
 
   /** Configure Regular Channel
   */
-  sConfig.Channel = ADC_CHANNEL_4;
+  sConfig.Channel = ADC_CHANNEL_3;
   sConfig.Rank = ADC_REGULAR_RANK_3;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Regular Channel
+  */
+  sConfig.Channel = ADC_CHANNEL_4;
+  sConfig.Rank = ADC_REGULAR_RANK_4;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
     Error_Handler();
@@ -1037,7 +1029,7 @@ static void MX_ADC2_Init(void)
   hadc2.Init.ScanConvMode = ADC_SCAN_DISABLE;
   hadc2.Init.ContinuousConvMode = DISABLE;
   hadc2.Init.DiscontinuousConvMode = DISABLE;
-  hadc2.Init.ExternalTrigConv = ADC_EXTERNALTRIGCONV_T3_TRGO;
+  hadc2.Init.ExternalTrigConv = ADC_SOFTWARE_START;
   hadc2.Init.DataAlign = ADC_DATAALIGN_RIGHT;
   hadc2.Init.NbrOfConversion = 1;
   if (HAL_ADC_Init(&hadc2) != HAL_OK)
@@ -1047,7 +1039,7 @@ static void MX_ADC2_Init(void)
 
   /** Configure Regular Channel
   */
-  sConfig.Channel = ADC_CHANNEL_3;
+  sConfig.Channel = ADC_CHANNEL_2;
   sConfig.Rank = ADC_REGULAR_RANK_1;
   sConfig.SamplingTime = ADC_SAMPLETIME_239CYCLES_5;
   if (HAL_ADC_ConfigChannel(&hadc2, &sConfig) != HAL_OK)
@@ -1255,11 +1247,11 @@ static void MX_TIM3_Init(void)
 
   /* USER CODE END TIM3_Init 1 */
   htim3.Instance = TIM3;
-  htim3.Init.Prescaler = 71;
+  htim3.Init.Prescaler = 10;
   htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim3.Init.Period = 1000;
   htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
   if (HAL_TIM_Base_Init(&htim3) != HAL_OK)
   {
     Error_Handler();
@@ -1281,7 +1273,7 @@ static void MX_TIM3_Init(void)
   }
   sConfigOC.OCMode = TIM_OCMODE_PWM1;
   sConfigOC.Pulse = 0;
-  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_LOW;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
   if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
   {

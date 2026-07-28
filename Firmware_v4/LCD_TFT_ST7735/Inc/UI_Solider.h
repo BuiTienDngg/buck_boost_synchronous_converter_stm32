@@ -37,5 +37,6 @@ void UI_Solider_SelectPreset(uint8_t id);
 void UI_Solider_SetPreset(uint8_t id, float temp);
 
 uint8_t UI_Solider_IsActive(void);
-
+void Solider_PID_Enable(uint8_t enable);
+void Solider_PID_Task(float set_adc);
 #endif

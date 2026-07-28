@@ -2,7 +2,9 @@
 #include "ST7735_SPI.h"
 #include <stdio.h>
 #include <string.h>
-
+#include "main.h"
+#include <stdint.h>
+#include "ui.h"
 #define SOL_FONT_SMALL              Font_7x10
 #define SOL_FONT_MEDIUM             Font_11x18
 #define SOL_FONT_BIG                Font_16x26
@@ -41,6 +43,31 @@
 #define SOL_SAMPLE_MS               50
 #define SOL_LCD_PERIOD_MS           120
 
+#define SOLIDER_ADC_INDEX              2
+
+#define SOLIDER_PID_PERIOD_MS          500
+#define SOLIDER_OFF_READ_DELAY_MS      100
+#define SOLIDER_ADC_AVG_N              10
+
+#define SOLIDER_CCR_MAX_POWER          300
+#define SOLIDER_CCR_OFF                999
+
+#define SOLIDER_PID_DT                 0.5f
+
+#define SOLIDER_KP                  0.1f
+#define SOLIDER_KI                  0.05f
+#define SOLIDER_KD                  0.000f
+
+
+#define SOLIDER_ADC_TEMP_K          (350.0f / 600.0f)
+#define SOLIDER_ADC_TEMP_B          0.0f
+
+#define SOLIDER_TEMP_MIN_C          25.0f
+#define SOLIDER_TEMP_MAX_C          500.0f
+extern volatile uint8_t adc1_dma_ready;
+extern uint16_t adc1_dma_buf[];
+extern BBUI_Data_t PowerStage;
+
 static UI_Solider_Data_t sol;
 
 static uint8_t sol_active = 0;
@@ -68,7 +95,53 @@ static char c_power[32] = "";
 static char c_p1[16] = "";
 static char c_p2[16] = "";
 static char c_p3[16] = "";
+typedef enum
+{
+    SOLIDER_PID_IDLE = 0,
+    SOLIDER_PID_RUN,
+    SOLIDER_PID_OFF_WAIT,
+    SOLIDER_PID_READ_ADC
+} SoliderPID_State_t;
 
+static SoliderPID_State_t solider_pid_state = SOLIDER_PID_IDLE;
+
+static uint32_t solider_pid_tick = 0;
+static uint32_t solider_off_tick = 0;
+
+static uint32_t solider_adc_sum = 0;
+static uint16_t solider_adc_count = 0;
+
+static float solider_pid_i = 0.0f;
+static float solider_pid_prev_err = 0.0f;
+
+volatile float solider_temp_raw = 0.0f;
+volatile float solider_pid_power = 0.0f;
+volatile uint16_t solider_pwm_ccr = SOLIDER_CCR_OFF;
+
+volatile float measured_temp;
+volatile float set_temp;
+
+#define SOLIDER_ADC_TEMP_K          (350.0f / 600.0f)
+#define SOLIDER_ADC_TEMP_B          0.0f
+
+#define SOLIDER_TEMP_MIN_C          25.0f
+#define SOLIDER_TEMP_MAX_C          500.0f
+
+static float clampf_solider(float x, float min, float max)
+{
+    if(x < min) return min;
+    if(x > max) return max;
+    return x;
+}
+
+float Solider_ADC_ToTemp(uint16_t adc_raw)
+{
+    //float temp = SOLIDER_ADC_TEMP_K * (float)adc_raw + SOLIDER_ADC_TEMP_B;
+		float temp = (float)adc_raw - 500.0f;
+    temp = clampf_solider(temp * 3, SOLIDER_TEMP_MIN_C, SOLIDER_TEMP_MAX_C);
+
+    return temp;
+}
 static float clampf_sol(float x, float min, float max)
 {
     if(x < min) return min;
@@ -596,5 +669,181 @@ void UI_Solider_Task(uint8_t force)
         sol_dirty = 0;
 
         UpdateValues(0);
+    }
+}
+uint16_t ccr = 0;
+static void Solider_SetPower(float power)
+{
+    power = clampf_solider(power, 0.0f, 1.0f);
+
+    /*
+       Vì m?ch c?a b?n:
+       power = 1.0 -> CCR = 300, m?nh nh?t
+       power = 0.0 -> CCR = 999, t?t
+    */
+    ccr = (uint16_t)((float)SOLIDER_CCR_OFF -
+                   power * (float)(SOLIDER_CCR_OFF - SOLIDER_CCR_MAX_POWER));
+
+    if(ccr < SOLIDER_CCR_MAX_POWER)
+        ccr = SOLIDER_CCR_MAX_POWER;
+
+    if(ccr > SOLIDER_CCR_OFF)
+        ccr = SOLIDER_CCR_OFF;
+
+    TIM3->CCR2 = ccr;
+
+    solider_pid_power = power;
+    solider_pwm_ccr = ccr;
+}
+
+static void Solider_PID_Reset(void)
+{
+    solider_pid_i = 0.0f;
+    solider_pid_prev_err = 0.0f;
+
+    solider_adc_sum = 0;
+    solider_adc_count = 0;
+
+    solider_pid_power = 0.0f;
+    solider_pwm_ccr = SOLIDER_CCR_OFF;
+
+    TIM3->CCR2 = SOLIDER_CCR_OFF;
+}
+
+void Solider_PID_Enable(uint8_t enable)
+{
+    if(enable)
+    {
+        if(solider_pid_state == SOLIDER_PID_IDLE)
+        {
+            Solider_PID_Reset();
+            solider_pid_tick = HAL_GetTick();
+            solider_pid_state = SOLIDER_PID_RUN;
+        }
+    }
+    else
+    {
+        solider_pid_state = SOLIDER_PID_IDLE;
+        Solider_PID_Reset();
+    }
+}
+
+static float Solider_PID_Compute(float set_temp, float measured_temp)
+{
+    float err = set_temp - measured_temp;
+
+    float p = SOLIDER_KP * err;
+    float d = SOLIDER_KD * (err - solider_pid_prev_err) / SOLIDER_PID_DT;
+
+    float i_new = solider_pid_i + SOLIDER_KI * err * SOLIDER_PID_DT;
+
+    float out_unsat = p + i_new + d;
+
+    if(!((out_unsat > 1.0f && err > 0.0f) ||
+         (out_unsat < 0.0f && err < 0.0f)))
+    {
+        solider_pid_i = i_new;
+    }
+
+    solider_pid_i = clampf_solider(solider_pid_i, -0.5f, 1.0f);
+
+    float out = p + solider_pid_i + d;
+    out = clampf_solider(out, 0.0f, 1.0f);
+
+    solider_pid_prev_err = err;
+
+    return out;
+}
+
+void Solider_PID_Task(float set_adc)
+{
+    uint32_t now = HAL_GetTick();
+
+    switch(solider_pid_state)
+    {
+        case SOLIDER_PID_IDLE:
+        {
+            TIM3->CCR2 = SOLIDER_CCR_OFF;
+        }
+        break;
+
+        case SOLIDER_PID_RUN:
+        {
+            if(now - solider_pid_tick >= SOLIDER_PID_PERIOD_MS)
+            {
+                solider_pid_tick = now;
+
+                /*
+                   T?t m? hàn tru?c khi d?c nhi?t d?.
+                */
+                TIM3->CCR2 = SOLIDER_CCR_OFF;
+
+                solider_off_tick = now;
+
+                solider_adc_sum = 0;
+                solider_adc_count = 0;
+
+                /*
+                   Xóa c? ADC cu d? tránh l?y l?i m?u tru?c dó.
+                */
+                adc1_dma_ready = 0;
+
+                solider_pid_state = SOLIDER_PID_OFF_WAIT;
+            }
+        }
+        break;
+
+        case SOLIDER_PID_OFF_WAIT:
+        {
+            if(now - solider_off_tick >= SOLIDER_OFF_READ_DELAY_MS)
+            {
+                solider_adc_sum = 0;
+                solider_adc_count = 0;
+                adc1_dma_ready = 0;
+
+                solider_pid_state = SOLIDER_PID_READ_ADC;
+            }
+        }
+        break;
+
+        case SOLIDER_PID_READ_ADC:
+        {
+            if(adc1_dma_ready)
+            {
+                adc1_dma_ready = 0;
+
+                solider_adc_sum += adc1_dma_buf[SOLIDER_ADC_INDEX];
+                solider_adc_count++;
+
+                if(solider_adc_count >= SOLIDER_ADC_AVG_N)
+								{
+										uint16_t adc_avg = solider_adc_sum / SOLIDER_ADC_AVG_N;
+
+										solider_temp_raw = adc_avg;
+
+										measured_temp = Solider_ADC_ToTemp(adc_avg);
+										set_temp = UI_Solider_GetSetTemp();
+
+										float power = Solider_PID_Compute(set_temp, measured_temp);
+
+										Solider_SetPower(power);
+
+										UI_Solider_SetData(measured_temp,
+																			 PowerStage.current,
+																			 PowerStage.temp,
+																			 power * 72.0f);
+
+										solider_pid_state = SOLIDER_PID_RUN;
+								}
+            }
+        }
+        break;
+
+        default:
+        {
+            solider_pid_state = SOLIDER_PID_IDLE;
+            Solider_PID_Reset();
+        }
+        break;
     }
 }

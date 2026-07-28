@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "UI_Solider.h"
-
+#include "main.h"
 #define UI_FONT_SMALL              Font_7x10
 #define UI_FONT_BIG                Font_16x26
 #define UI_FONT_MEDIUM             Font_11x18

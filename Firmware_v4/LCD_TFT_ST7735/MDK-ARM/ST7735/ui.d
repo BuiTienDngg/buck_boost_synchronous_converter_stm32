@@ -26,4 +26,4 @@ st7735/ui.o: ..\Src\UI.c ..\Inc\UI.h \
   ..\Drivers\STM32F1xx_HAL_Driver\Inc\stm32f1xx_ll_usb.h \
   ..\Drivers\STM32F1xx_HAL_Driver\Inc\stm32f1xx_hal_pcd_ex.h \
   ..\ST7735_LCD_TFT\ST7735_SPI.h ..\SYSTEM\Platform.h \
-  ..\ST7735_LCD_TFT\fonts.h ..\Inc\UI_Solider.h
+  ..\ST7735_LCD_TFT\fonts.h ..\Inc\UI_Solider.h ..\Inc\main.h

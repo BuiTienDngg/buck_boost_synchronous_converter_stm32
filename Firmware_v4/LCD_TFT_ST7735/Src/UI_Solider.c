@@ -45,12 +45,12 @@
 
 #define SOLIDER_ADC_INDEX              2
 
-#define SOLIDER_PID_PERIOD_MS          500
-#define SOLIDER_OFF_READ_DELAY_MS      100
-#define SOLIDER_ADC_AVG_N              10
-
-#define SOLIDER_CCR_MAX_POWER          300
-#define SOLIDER_CCR_OFF                999
+#define SOLIDER_PID_PERIOD_MS          100
+#define SOLIDER_OFF_READ_DELAY_MS      20
+#define SOLIDER_ADC_AVG_N              20
+#define ALPHA_FIR											0.5f
+#define SOLIDER_CCR_MAX_POWER          500
+#define SOLIDER_CCR_OFF                1000
 
 #define SOLIDER_PID_DT                 0.5f
 
@@ -119,6 +119,7 @@ volatile float solider_pid_power = 0.0f;
 volatile uint16_t solider_pwm_ccr = SOLIDER_CCR_OFF;
 
 volatile float measured_temp;
+volatile float frev_measured_temp;
 volatile float set_temp;
 
 #define SOLIDER_ADC_TEMP_K          (350.0f / 600.0f)
@@ -137,8 +138,8 @@ static float clampf_solider(float x, float min, float max)
 float Solider_ADC_ToTemp(uint16_t adc_raw)
 {
     //float temp = SOLIDER_ADC_TEMP_K * (float)adc_raw + SOLIDER_ADC_TEMP_B;
-		float temp = (float)adc_raw - 500.0f;
-    temp = clampf_solider(temp * 3, SOLIDER_TEMP_MIN_C, SOLIDER_TEMP_MAX_C);
+		float temp = (float)adc_raw - 1000.0f;
+    temp = clampf_solider(temp , SOLIDER_TEMP_MIN_C, SOLIDER_TEMP_MAX_C);
 
     return temp;
 }
@@ -672,23 +673,24 @@ void UI_Solider_Task(uint8_t force)
     }
 }
 uint16_t ccr = 0;
+float power_ = 0;
+//#define SOLIDER_CCR_MAX_POWER          500
+//#define SOLIDER_CCR_OFF                999
 static void Solider_SetPower(float power)
 {
     power = clampf_solider(power, 0.0f, 1.0f);
 
     /*
        Vì m?ch c?a b?n:
-       power = 1.0 -> CCR = 300, m?nh nh?t
+       power = 1.0 -> CCR = 500, m?nh nh?t
        power = 0.0 -> CCR = 999, t?t
     */
-    ccr = (uint16_t)((float)SOLIDER_CCR_OFF -
-                   power * (float)(SOLIDER_CCR_OFF - SOLIDER_CCR_MAX_POWER));
+    ccr = (uint16_t)(SOLIDER_CCR_OFF - power * (float)(SOLIDER_CCR_OFF - SOLIDER_CCR_MAX_POWER));
+    if(ccr > SOLIDER_CCR_OFF)
+        ccr = SOLIDER_CCR_OFF;
 
     if(ccr < SOLIDER_CCR_MAX_POWER)
         ccr = SOLIDER_CCR_MAX_POWER;
-
-    if(ccr > SOLIDER_CCR_OFF)
-        ccr = SOLIDER_CCR_OFF;
 
     TIM3->CCR2 = ccr;
 
@@ -818,20 +820,21 @@ void Solider_PID_Task(float set_adc)
                 if(solider_adc_count >= SOLIDER_ADC_AVG_N)
 								{
 										uint16_t adc_avg = solider_adc_sum / SOLIDER_ADC_AVG_N;
-
 										solider_temp_raw = adc_avg;
-
+										
 										measured_temp = Solider_ADC_ToTemp(adc_avg);
+										measured_temp = measured_temp * ALPHA_FIR + frev_measured_temp * (1.0f - ALPHA_FIR);
+										frev_measured_temp = measured_temp;
 										set_temp = UI_Solider_GetSetTemp();
 
-										float power = Solider_PID_Compute(set_temp, measured_temp);
+										power_ = Solider_PID_Compute(set_temp, measured_temp);
 
-										Solider_SetPower(power);
+										Solider_SetPower(power_);
 
 										UI_Solider_SetData(measured_temp,
 																			 PowerStage.current,
 																			 PowerStage.temp,
-																			 power * 72.0f);
+																			 power_ * 72.0f);
 
 										solider_pid_state = SOLIDER_PID_RUN;
 								}

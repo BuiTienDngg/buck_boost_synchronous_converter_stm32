@@ -870,12 +870,14 @@ int main(void)
     /* USER CODE BEGIN 3 */
 		if(UI_Solider_IsActive())
     {
-        Solider_PID_Enable(1);
-        Solider_PID_Task(600.0f);
+//        Solider_PID_Enable(1);
+//        Solider_PID_Task(600.0f);
+			TIM3 -> CCR2 = 800;
     }
     else
     {
-        Solider_PID_Enable(0);
+//        Solider_PID_Enable(0);
+			TIM3 -> CCR2 = 200;
     }
 
     BBUI_Task();
@@ -1247,7 +1249,7 @@ static void MX_TIM3_Init(void)
 
   /* USER CODE END TIM3_Init 1 */
   htim3.Instance = TIM3;
-  htim3.Init.Prescaler = 10;
+  htim3.Init.Prescaler = 71;
   htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim3.Init.Period = 1000;
   htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;

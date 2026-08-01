@@ -46,10 +46,10 @@
 #define SOLIDER_ADC_INDEX              2
 
 #define SOLIDER_PID_PERIOD_MS          100
-#define SOLIDER_OFF_READ_DELAY_MS      20
+#define SOLIDER_OFF_READ_DELAY_MS      50
 #define SOLIDER_ADC_AVG_N              20
 #define ALPHA_FIR											0.5f
-#define SOLIDER_CCR_MAX_POWER          500
+#define SOLIDER_CCR_MAX_POWER          200
 #define SOLIDER_CCR_OFF                1000
 
 #define SOLIDER_PID_DT                 0.5f
@@ -138,7 +138,7 @@ static float clampf_solider(float x, float min, float max)
 float Solider_ADC_ToTemp(uint16_t adc_raw)
 {
     //float temp = SOLIDER_ADC_TEMP_K * (float)adc_raw + SOLIDER_ADC_TEMP_B;
-		float temp = (float)adc_raw - 1000.0f;
+		float temp = ((float)adc_raw - 450.0f) * 1.85f;
     temp = clampf_solider(temp , SOLIDER_TEMP_MIN_C, SOLIDER_TEMP_MAX_C);
 
     return temp;

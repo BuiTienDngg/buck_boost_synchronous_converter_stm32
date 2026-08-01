@@ -52,7 +52,7 @@
 
 #define DISP_ALPHA                 0.25f
 
-#define SWITCH_PIN GPIO_PIN_5
+#define SWITCH_PIN GPIO_PIN_15
 #define SWITCH_PORT GPIOB
 typedef enum
 {

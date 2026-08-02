@@ -812,6 +812,7 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
         HAL_GPIO_WritePin(GPIOB, GPIO_PIN_11, 0);
     }
 }
+int sleep = 0;
 /* USER CODE END 0 */
 
 /**
@@ -868,6 +869,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+		sleep = HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13);
 		if(UI_Solider_IsActive())
     {
         Solider_PID_Enable(1);

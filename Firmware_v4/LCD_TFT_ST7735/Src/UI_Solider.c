@@ -16,15 +16,15 @@
 #define SOL_TEMP_MAX                450.0f
 
 #define SOL_CURR_MIN                0.0f
-#define SOL_CURR_MAX                5.0f
-
+#define SOL_CURR_MAX                10.0f
+#define SOL_POWER_MAX								24.0f * SOL_CURR_MAX
 #define SOL_SET_MIN                 150.0f
 #define SOL_SET_MAX                 450.0f
 #define SOL_SET_STEP                5.0f
 
-#define SOL_GRAPH_X0                15
-#define SOL_GRAPH_Y0                12
-#define SOL_GRAPH_X1                111
+#define SOL_GRAPH_X0                2
+#define SOL_GRAPH_Y0                13
+#define SOL_GRAPH_X1                125
 #define SOL_GRAPH_Y1                88
 
 #define SOL_GRAPH_W                 (SOL_GRAPH_X1 - SOL_GRAPH_X0)
@@ -40,7 +40,7 @@
 
 #define SOL_GRAPH_N                 SOL_PLOT_W
 
-#define SOL_SAMPLE_MS               50
+#define SOL_SAMPLE_MS               100
 #define SOL_LCD_PERIOD_MS           120
 
 #define SOLIDER_ADC_INDEX              2
@@ -64,6 +64,15 @@
 
 #define SOLIDER_TEMP_MIN_C          25.0f
 #define SOLIDER_TEMP_MAX_C          500.0f
+
+#define SOL_CURRENT_EMA_ALPHA  0.12f
+
+static float solider_current_sum = 0.0f;
+static uint16_t solider_current_count = 0;
+
+static float solider_current_avg = 0.0f;
+static float solider_current_filtered = 0.0f;
+static uint8_t solider_current_filter_init = 0;
 extern volatile uint8_t adc1_dma_ready;
 extern uint16_t adc1_dma_buf[];
 extern BBUI_Data_t PowerStage;
@@ -90,7 +99,7 @@ static uint32_t t_lcd = 0;
 
 static char c_set[32] = "";
 static char c_ch[16] = "";
-static char c_fet[32] = "";
+static char c_tip[32] = "";
 static char c_power[32] = "";
 static char c_p1[16] = "";
 static char c_p2[16] = "";
@@ -154,7 +163,7 @@ static void ClearCache(void)
 {
     c_set[0] = 0;
     c_ch[0] = 0;
-    c_fet[0] = 0;
+    c_tip[0] = 0;
     c_power[0] = 0;
     c_p1[0] = 0;
     c_p2[0] = 0;
@@ -273,7 +282,7 @@ static int MapY(float value, float min, float max)
 
     float k = (value - min) / (max - min);
 
-    return SOL_PLOT_Y1 - (int)(k * (float)SOL_PLOT_H);
+    return SOL_PLOT_Y1 - (int)(k * (float)(SOL_PLOT_H - 1));
 }
 
 static void GraphDrawGridPixel(int x)
@@ -314,13 +323,29 @@ static void GraphClearCursor(int x)
 
 static void DrawGraphAxes(void)
 {
+    /* X?a ri?ng khu v?c d? th? v? h?ng ch? th?ch ph?a tr?n. */
     ST7735_FillRectangle(0, 0, SOL_LCD_W, 94, ST7735_BLACK);
 
-    ST7735_WriteString(2, 0, "T", SOL_FONT_SMALL, ST7735_RED, ST7735_BLACK);
-    ST7735_WriteString(119, 0, "A", SOL_FONT_SMALL, ST7735_CYAN, ST7735_BLACK);
+    /*
+     * Ch? th?ch d?t tr?n m?t h?ng ri?ng, kh?ng n?m trong v?ng plot n?n
+     * kh?ng b? du?ng d? th? ho?c c?c gi? tr? thang do che m?t.
+     */
+    ST7735_WriteString(2, 1,
+                       "T:150-450C",
+                       SOL_FONT_SMALL,
+                       ST7735_RED,
+                       ST7735_BLACK);
 
+    ST7735_WriteString(72, 1,
+                       "I:0-10A",
+                       SOL_FONT_SMALL,
+                       ST7735_CYAN,
+                       ST7735_BLACK);
+
+    /* Khung d? th? g?n s?t hai m?p m?n h?nh. */
     drawVline(SOL_GRAPH_X0, SOL_GRAPH_Y0, SOL_GRAPH_H, ST7735_RED);
     drawVline(SOL_GRAPH_X1, SOL_GRAPH_Y0, SOL_GRAPH_H, ST7735_CYAN);
+    drawHline(SOL_GRAPH_X0, SOL_GRAPH_Y0, SOL_GRAPH_W, ST7735_WHITE);
     drawHline(SOL_GRAPH_X0, SOL_GRAPH_Y1, SOL_GRAPH_W, ST7735_WHITE);
 
     drawHline(SOL_GRAPH_X0,
@@ -337,12 +362,6 @@ static void DrawGraphAxes(void)
               SOL_GRAPH_Y0 + 3 * SOL_GRAPH_H / 4,
               SOL_GRAPH_W,
               ST7735_BLUE);
-
-    ST7735_WriteString(0, SOL_GRAPH_Y0 - 2, "450", SOL_FONT_SMALL, ST7735_RED, ST7735_BLACK);
-    ST7735_WriteString(0, SOL_GRAPH_Y1 - 8, "150", SOL_FONT_SMALL, ST7735_RED, ST7735_BLACK);
-
-    ST7735_WriteString(114, SOL_GRAPH_Y0 - 2, "5", SOL_FONT_SMALL, ST7735_CYAN, ST7735_BLACK);
-    ST7735_WriteString(114, SOL_GRAPH_Y1 - 8, "0", SOL_FONT_SMALL, ST7735_CYAN, ST7735_BLACK);
 
     graph_last_x = -1;
     graph_last_yt = -1;
@@ -413,14 +432,18 @@ static void DrawBase(void)
 {
     ST7735_FillScreen(ST7735_BLACK);
 
-    ST7735_WriteString(2, 96, "SET", SOL_FONT_SMALL, ST7735_CYAN, ST7735_BLACK);
-    ST7735_WriteString(78, 99, "*C", SOL_FONT_SMALL, ST7735_CYAN, ST7735_BLACK);
+    /* Hai gi? tr? quan tr?ng nh?t: nhi?t d? th?t v? nhi?t d? d?t. */
+    ST7735_WriteString(2, 96, "TIP", SOL_FONT_SMALL, ST7735_RED, ST7735_BLACK);
+    ST7735_WriteString(66, 96, "SET", SOL_FONT_SMALL, ST7735_CYAN, ST7735_BLACK);
 
-    ST7735_WriteString(2, 116, "FET", SOL_FONT_SMALL, ST7735_RED, ST7735_BLACK);
-    ST7735_WriteString(48, 116, "*C", SOL_FONT_SMALL, ST7735_RED, ST7735_BLACK);
+    ST7735_WriteString(39, 111, "*C", SOL_FONT_SMALL, ST7735_RED, ST7735_BLACK);
+    ST7735_WriteString(103, 111, "*C", SOL_FONT_SMALL, ST7735_CYAN, ST7735_BLACK);
 
-    ST7735_WriteString(68, 116, "P", SOL_FONT_SMALL, ST7735_MAGENTA, ST7735_BLACK);
-    ST7735_WriteString(112, 116, "W", SOL_FONT_SMALL, ST7735_MAGENTA, ST7735_BLACK);
+    /* D?ng tr?ng th?i g?n ph?a tr?n c?c preset. */
+    ST7735_WriteString(2, 128, "PWR", SOL_FONT_SMALL, ST7735_MAGENTA, ST7735_BLACK);
+    ST7735_WriteString(58, 128, "W", SOL_FONT_SMALL, ST7735_MAGENTA, ST7735_BLACK);
+
+    drawHline(0, 138, 128, ST7735_BLUE);
 
     drawRect(0, 140, 41, 19, ST7735_GREEN);
     drawRect(43, 140, 41, 19, ST7735_YELLOW);
@@ -433,35 +456,37 @@ static void UpdatePresets(uint8_t force)
 {
     char buf[16];
 
-    uint16_t c1 = sol.active_preset == 0 ? ST7735_WHITE : ST7735_GREEN;
-    uint16_t c2 = sol.active_preset == 1 ? ST7735_WHITE : ST7735_YELLOW;
-    uint16_t c3 = sol.active_preset == 2 ? ST7735_WHITE : ST7735_MAGENTA;
+    /* Preset dang ch?n: d?. Hai preset c?n l?i: tr?ng. */
+    uint16_t c1 = (sol.active_preset == 0) ? ST7735_RED : ST7735_WHITE;
+    uint16_t c2 = (sol.active_preset == 1) ? ST7735_RED : ST7735_WHITE;
+    uint16_t c3 = (sol.active_preset == 2) ? ST7735_RED : ST7735_WHITE;
 
     drawRect(0, 140, 41, 19, c1);
     drawRect(43, 140, 41, 19, c2);
     drawRect(86, 140, 41, 19, c3);
 
-    sprintf(buf, "P1%03ld", (long)(sol.preset[0] + 0.5f));
+    /* Ch? hi?n th? nhi?t d?, kh?ng hi?n th? P1/P2/P3. */
+    sprintf(buf, "%03ld", (long)(sol.preset[0] + 0.5f));
     WriteCached(c_p1,
-                3, 146, 36,
+                10, 146, 24,
                 buf,
                 SOL_FONT_SMALL,
                 c1,
                 ST7735_BLACK,
                 force);
 
-    sprintf(buf, "P2%03ld", (long)(sol.preset[1] + 0.5f));
+    sprintf(buf, "%03ld", (long)(sol.preset[1] + 0.5f));
     WriteCached(c_p2,
-                46, 146, 36,
+                53, 146, 24,
                 buf,
                 SOL_FONT_SMALL,
                 c2,
                 ST7735_BLACK,
                 force);
 
-    sprintf(buf, "P3%03ld", (long)(sol.preset[2] + 0.5f));
+    sprintf(buf, "%03ld", (long)(sol.preset[2] + 0.5f));
     WriteCached(c_p3,
-                89, 146, 36,
+                96, 146, 24,
                 buf,
                 SOL_FONT_SMALL,
                 c3,
@@ -473,39 +498,42 @@ static void UpdateValues(uint8_t force)
 {
     char buf[32];
 
+    /* Nhi?t d? mui h?n th?c t?. */
+    FmtNumber(buf, sol.tip_temp, 0);
+    WriteCached(c_tip,
+                2, 105, 36,
+                buf,
+                SOL_FONT_MEDIUM,
+                ST7735_RED,
+                ST7735_BLACK,
+                force);
+
+    /* Nhi?t d? d?t. */
     FmtNumber(buf, sol.set_temp, 0);
     WriteCached(c_set,
-                28, 94, 48,
+                66, 105, 36,
                 buf,
                 SOL_FONT_MEDIUM,
                 ST7735_CYAN,
                 ST7735_BLACK,
                 force);
 
-    sprintf(buf, "CH%d", sol.active_preset + 1);
-    WriteCached(c_ch,
-                96, 99, 28,
-                buf,
-                SOL_FONT_SMALL,
-                ST7735_WHITE,
-                ST7735_BLACK,
-                force);
-
-    FmtNumber(buf, sol.fet_temp, 0);
-    WriteCached(c_fet,
-                26, 113, 24,
-                buf,
-                SOL_FONT_SMALL,
-                ST7735_RED,
-                ST7735_BLACK,
-                force);
-
+    /* C?ng su?t heater. */
     FmtNumber(buf, sol.power, 0);
     WriteCached(c_power,
-                80, 113, 30,
+                28, 128, 28,
                 buf,
                 SOL_FONT_SMALL,
                 ST7735_MAGENTA,
+                ST7735_BLACK,
+                force);
+
+    /* Kh?ng c?n hi?n th? CH1/CH2/CH3; khung d? ph?a du?i d? ch? preset dang ch?n. */
+    WriteCached(c_ch,
+                98, 128, 28,
+                "   ",
+                SOL_FONT_SMALL,
+                ST7735_BLACK,
                 ST7735_BLACK,
                 force);
 
@@ -581,8 +609,10 @@ void UI_Solider_SetData(float tip_temp,
 {
     sol.tip_temp = tip_temp;
     sol.current = current;
-    sol.fet_temp = fet_temp;
     sol.power = power;
+
+    /* Gi? tham s? d? kh?ng ph?i s?a API cu, nhung kh?ng c?n hi?n th? FET. */
+    (void)fet_temp;
 }
 
 float UI_Solider_GetSetTemp(void)
@@ -681,7 +711,7 @@ static void Solider_SetPower(float power)
     power = clampf_solider(power, 0.0f, 1.0f);
 
     /*
-       Vì m?ch c?a b?n:
+       V? m?ch c?a b?n:
        power = 1.0 -> CCR = 500, m?nh nh?t
        power = 0.0 -> CCR = 999, t?t
     */
@@ -708,7 +738,12 @@ static void Solider_PID_Reset(void)
 
     solider_pid_power = 0.0f;
     solider_pwm_ccr = SOLIDER_CCR_OFF;
+		solider_current_sum = 0.0f;
+		solider_current_count = 0;
+		solider_current_avg = 0.0f;
 
+		solider_current_filtered = 0.0f;
+		solider_current_filter_init = 0;
     TIM3->CCR2 = SOLIDER_CCR_OFF;
 }
 
@@ -770,30 +805,68 @@ void Solider_PID_Task(float set_adc)
         break;
 
         case SOLIDER_PID_RUN:
-        {
-            if(now - solider_pid_tick >= SOLIDER_PID_PERIOD_MS)
-            {
-                solider_pid_tick = now;
+				{
+						/*
+						 * T?ch luy d?ng trong th?i gian heater dang b?t.
+						 * Lo?i b? gi? tr? l?i ngo?i thang do.
+						 */
+						float current_sample = PowerStage.current;
 
-                /*
-                   T?t m? hàn tru?c khi d?c nhi?t d?.
-                */
-                TIM3->CCR2 = SOLIDER_CCR_OFF;
+						if(current_sample >= 0.0f &&
+							 current_sample <= SOL_CURR_MAX)
+						{
+								solider_current_sum += current_sample;
+								solider_current_count++;
+						}
 
-                solider_off_tick = now;
+						if(now - solider_pid_tick >= SOLIDER_PID_PERIOD_MS)
+						{
+								solider_pid_tick = now;
 
-                solider_adc_sum = 0;
-                solider_adc_count = 0;
+								/*
+								 * Trung b?nh c?c m?u d?ng c?a chu k? heater ON.
+								 */
+								if(solider_current_count > 0)
+								{
+										solider_current_avg =
+												solider_current_sum /
+												(float)solider_current_count;
 
-                /*
-                   Xóa c? ADC cu d? tránh l?y l?i m?u tru?c dó.
-                */
-                adc1_dma_ready = 0;
+										/*
+										 * EMA ch? d?ng cho hi?n th? d? th?.
+										 */
+										if(solider_current_filter_init == 0)
+										{
+												solider_current_filtered = solider_current_avg;
+												solider_current_filter_init = 1;
+										}
+										else
+										{
+												solider_current_filtered =
+														(1.0f - SOL_CURRENT_EMA_ALPHA) *
+														solider_current_filtered +
+														SOL_CURRENT_EMA_ALPHA *
+														solider_current_avg;
+										}
+								}
 
-                solider_pid_state = SOLIDER_PID_OFF_WAIT;
-            }
-        }
-        break;
+								solider_current_sum = 0.0f;
+								solider_current_count = 0;
+
+								/*
+								 * T?t heater d? do nhi?t d?.
+								 */
+								TIM3->CCR2 = SOLIDER_CCR_OFF;
+
+								solider_off_tick = now;
+								solider_adc_sum = 0;
+								solider_adc_count = 0;
+								adc1_dma_ready = 0;
+
+								solider_pid_state = SOLIDER_PID_OFF_WAIT;
+						}
+				}
+				break;
 
         case SOLIDER_PID_OFF_WAIT:
         {
@@ -832,9 +905,9 @@ void Solider_PID_Task(float set_adc)
 										Solider_SetPower(power_);
 
 										UI_Solider_SetData(measured_temp,
-																			 PowerStage.current,
+																			 solider_current_filtered,
 																			 PowerStage.temp,
-																			 power_ * 72.0f);
+																			 solider_current_filtered * PowerStage.vout);
 
 										solider_pid_state = SOLIDER_PID_RUN;
 								}

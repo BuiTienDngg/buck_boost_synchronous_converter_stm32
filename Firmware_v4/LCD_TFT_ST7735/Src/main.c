@@ -133,10 +133,31 @@ static void MX_TIM4_Init(void);
 #define CC_I_MIN            -0.30f
 #define CC_I_MAX             0.30f
 
-#define SOFTSTART_RATE_VS    8.0f
+#define SOFTSTART_RATE_VS    6.0f
 #define I_HARD_MARGIN        1.0f
 
+#define I_HARD_LIMIT_A              8.5f
+#define POWER_START_BLANK_MS        200U
 
+/* Input-voltage droop limiter. Vin may be 12 V, 15 V, 20 V, etc. */
+#define VIN_FILTER_ALPHA            0.03f
+#define VIN_REF_UPDATE_ALPHA        0.01f
+#define VIN_DROOP_ENTER_RATIO       0.90f
+#define VIN_DROOP_EXIT_RATIO        0.93f
+#define VIN_LIMIT_DOWN_RATE_AS      15.0f
+#define VIN_LIMIT_UP_RATE_AS        1.0f
+#define VIN_LIMIT_MIN_CURRENT       0.20f
+#define VIN_REF_LIGHT_CURRENT       0.30f
+
+static float vin_filtered = 0.0f;
+static float vin_reference = 0.0f;
+static float input_limited_iset = 0.0f;
+static uint8_t vin_filter_init = 0U;
+static uint8_t input_limit_active = 0U;
+
+static uint8_t power_prev_enable = 0;
+static uint32_t power_start_tick = 0;
+static float solider_current_hold = 0.0f;
 static float cv_i = 0.0f;
 static float cc_i = 0.0f;
 extern UI_MainField_t main_field;
@@ -199,7 +220,8 @@ BBUI_Data_t PowerStage =
     .batt_cells = 3,
     .active_preset = 0,
     .mqtt_enable = 0,
-
+		.max_input_power = 200.0f,
+    .start_mode = BB_START_SOFT,
     .preset =
     {
         {12.0f, 5.0f},
@@ -288,7 +310,89 @@ static float Read_Vin(uint16_t adc_vin)
 {
     return ADC_To_Voltage(adc_vin) * VIN_DIV_GAIN;
 }
+static void PowerStage_UpdateIdleVinReference(void)
+{
+    /* Learn source no-load voltage only while the converter is disabled. */
+    if((PowerStage.enable == 0U) &&
+       (PowerStage.vin > VIN_MIN_PROTECT))
+    {
+        if(vin_reference < VIN_MIN_PROTECT)
+        {
+            vin_reference = PowerStage.vin;
+        }
+        else
+        {
+            vin_reference += VIN_REF_UPDATE_ALPHA *
+                             (PowerStage.vin - vin_reference);
+        }
+    }
+}
 
+static void PowerStage_InputDroopRuntimeReset(void)
+{
+    /* Keep vin_reference: it was learned while output was OFF. */
+    vin_filtered = PowerStage.vin;
+    input_limited_iset = PowerStage.iset;
+    vin_filter_init = 1U;
+    input_limit_active = 0U;
+}
+
+static float PowerStage_GetInputDroopCurrentLimit(void)
+{
+    if(vin_filter_init == 0U)
+    {
+        PowerStage_InputDroopRuntimeReset();
+    }
+
+    vin_filtered += VIN_FILTER_ALPHA *
+                    (PowerStage.vin - vin_filtered);
+
+    /* Fallback if output was enabled before a valid idle reference existed. */
+    if(vin_reference < VIN_MIN_PROTECT)
+    {
+        vin_reference = PowerStage.vin;
+    }
+
+    float vin_enter = vin_reference * VIN_DROOP_ENTER_RATIO;
+    float vin_exit  = vin_reference * VIN_DROOP_EXIT_RATIO;
+
+    if(input_limit_active == 0U)
+    {
+        if(vin_filtered <= vin_enter)
+        {
+            input_limit_active = 1U;
+        }
+    }
+    else
+    {
+        if(vin_filtered >= vin_exit)
+        {
+            input_limit_active = 0U;
+        }
+    }
+
+    if(input_limited_iset > PowerStage.iset)
+    {
+        input_limited_iset = PowerStage.iset;
+    }
+
+    if(input_limit_active != 0U)
+    {
+        input_limited_iset -= VIN_LIMIT_DOWN_RATE_AS * CTRL_TS;
+    }
+    else
+    {
+        input_limited_iset += VIN_LIMIT_UP_RATE_AS * CTRL_TS;
+    }
+
+    if(input_limited_iset < VIN_LIMIT_MIN_CURRENT)
+        input_limited_iset = VIN_LIMIT_MIN_CURRENT;
+
+    if(input_limited_iset > PowerStage.iset)
+        input_limited_iset = PowerStage.iset;
+
+    return input_limited_iset;
+}
 uint16_t raw = 0;
 static float Read_NTC_Temp(void)
 {
@@ -363,7 +467,7 @@ static void PowerStage_Stop(void)
 //    if(!PowerStage_pwm_running)
 //        return;
 		TIM1 -> CCR1 = 0;
-		TIM2 -> CCR2 = 0;
+		TIM1 -> CCR2 = 0;
     HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_1);
     HAL_TIMEx_PWMN_Stop(&htim1, TIM_CHANNEL_1);
 		HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_2);
@@ -496,7 +600,7 @@ static float PowerStage_FeedForward_Ratio(float vin, float vref)
 
     return clampf(ratio, RATIO_MIN, RATIO_MAX);
 }
-static void PowerStage_SoftStart_1kHz(void)
+static void PowerStage_StartReference_1kHz(void)
 {
     if(PowerStage.enable == 0)
     {
@@ -504,6 +608,15 @@ static void PowerStage_SoftStart_1kHz(void)
         return;
     }
 
+    if(PowerStage.start_mode == BB_START_HARD)
+    {
+        vref_soft = PowerStage.vset;
+        return;
+    }
+
+    /*
+     * Soft-start.
+     */
     if(vref_soft < PowerStage.vset)
     {
         vref_soft += SOFTSTART_RATE_VS * CTRL_TS;
@@ -526,7 +639,36 @@ static void PowerStage_CVCC_Reset(void)
 }
 void PowerStage_CloseLoop_CVCC_1kHz(void)
 {
-    if(PowerStage.enable == 0)
+    uint32_t now = HAL_GetTick();
+
+    /*
+     * =====================================================
+     * PH?T HI?N C?NH B?T NGU?N
+     * =====================================================
+     */
+    if((PowerStage.enable != 0U) &&
+			 (power_prev_enable == 0U))
+		{
+				power_start_tick = now;
+
+				cv_i = 0.0f;
+				cc_i = 0.0f;
+				ratio_out = RATIO_MIN;
+				vref_soft = 0.0f;
+
+                PowerStage_InputDroopRuntimeReset();
+
+				PowerStage_Start();
+		}
+
+    power_prev_enable = PowerStage.enable;
+
+    /*
+     * =====================================================
+     * OUTPUT OFF
+     * =====================================================
+     */
+    if(PowerStage.enable == 0U)
     {
         PowerStage_CVCC_Reset();
 
@@ -536,77 +678,197 @@ void PowerStage_CloseLoop_CVCC_1kHz(void)
 
         return;
     }
-		PowerStage_Start();
+
+    /*
+     * =====================================================
+     * B?O V? ?I?N ?P V?O
+     * =====================================================
+     */
     if(PowerStage.vin < VIN_MIN_PROTECT)
     {
         PowerStage_CVCC_Reset();
 
-        PowerStage.enable = 0;
+        PowerStage.enable = 0U;
         PowerStage.state = BBUI_STATE_FAULT;
 
         PowerStage_Stop();
 
+        power_prev_enable = 0U;
+
         return;
     }
 
+    /*
+     * =====================================================
+     * B?O V? NHI?T ??
+     * =====================================================
+     */
     if(PowerStage.temp > TEMP_MAX_PROTECT)
     {
         PowerStage_CVCC_Reset();
 
-        PowerStage.enable = 0;
+        PowerStage.enable = 0U;
         PowerStage.state = BBUI_STATE_FAULT;
 
         PowerStage_Stop();
 
+        power_prev_enable = 0U;
+
         return;
     }
 
-    if(PowerStage.current > PowerStage.iset + I_HARD_MARGIN)
+    /*
+     * =====================================================
+     * B?O V? QU? D?NG C?NG
+     * =====================================================
+     *
+     * B? qua trong 200 ms d?u d? tr?nh d?ng do cu,
+     * spike chuy?n relay ho?c xung kh?i d?ng g?y false fault.
+     *
+     * Gi?i h?n c?ng su?t kh?ng du?c d?ng l?m ngu?ng FAULT.
+     */
+    if((uint32_t)(now - power_start_tick) >=
+       POWER_START_BLANK_MS)
     {
-        PowerStage_CVCC_Reset();
+        if(PowerStage.current > I_HARD_LIMIT_A)
+        {
+            PowerStage_CVCC_Reset();
 
-        PowerStage.enable = 0;
-        PowerStage.state = BBUI_STATE_FAULT;
+            PowerStage.enable = 0U;
+            PowerStage.state = BBUI_STATE_FAULT;
 
-        PowerStage_Stop();
+            PowerStage_Stop();
 
-        return;
+            power_prev_enable = 0U;
+
+            return;
+        }
     }
 
-    PowerStage_SoftStart_1kHz();
+    /*
+     * B?o d?m PWM d? du?c b?t.
+     * N?u PowerStage_Start() ch? c?n g?i m?t l?n,
+     * c? th? b? d?ng n?y v? d? g?i ? c?nh enable.
+     */
+    PowerStage_Start();
 
-    float ratio_ff = PowerStage_FeedForward_Ratio(PowerStage.vin, vref_soft);
+    /*
+     * =====================================================
+     * HARD-START / SOFT-START REFERENCE
+     * =====================================================
+     */
+    PowerStage_StartReference_1kHz();
 
-    float err_v = vref_soft - PowerStage.vout;
-    float err_i = PowerStage.iset - PowerStage.current;
+    /*
+     * Ph?i t?nh effective_iset sau khi c?p nh?t vref_soft,
+     * v? gi?i h?n c?ng su?t c? th? ph? thu?c vref_soft.
+     */
+    float effective_iset = PowerStage_GetInputDroopCurrentLimit();
 
-    float cv_i_new = cv_i + CV_KI * err_v * CTRL_TS;
-    float cc_i_new = cc_i + CC_KI * err_i * CTRL_TS;
+    /*
+     * =====================================================
+     * FEED-FORWARD
+     * =====================================================
+     */
+    float ratio_ff =
+        PowerStage_FeedForward_Ratio(PowerStage.vin,
+                                     vref_soft);
 
-    cv_i_new = clampf(cv_i_new, CV_I_MIN, CV_I_MAX);
-    cc_i_new = clampf(cc_i_new, CC_I_MIN, CC_I_MAX);
+    /*
+     * =====================================================
+     * SAI S? CV V? CC
+     * =====================================================
+     */
+    float err_v =
+        vref_soft - PowerStage.vout;
 
-    float ratio_cv_unsat = ratio_ff + CV_KP * err_v + cv_i_new;
-    float ratio_cc_unsat = ratio_ff + CC_KP * err_i + cc_i_new;
+    float err_i =
+        effective_iset - PowerStage.current;
 
-    float ratio_cv = clampf(ratio_cv_unsat, RATIO_MIN, RATIO_MAX);
-    float ratio_cc = clampf(ratio_cc_unsat, RATIO_MIN, RATIO_MAX);
+    /*
+     * =====================================================
+     * T?CH PH?N T?M TH?I
+     * =====================================================
+     */
+    float cv_i_new =
+        cv_i + CV_KI * err_v * CTRL_TS;
 
-    if(!((ratio_cv_unsat > RATIO_MAX && err_v > 0.0f) ||
-         (ratio_cv_unsat < RATIO_MIN && err_v < 0.0f)))
+    float cc_i_new =
+        cc_i + CC_KI * err_i * CTRL_TS;
+
+    cv_i_new =
+        clampf(cv_i_new, CV_I_MIN, CV_I_MAX);
+
+    cc_i_new =
+        clampf(cc_i_new, CC_I_MIN, CC_I_MAX);
+
+    /*
+     * =====================================================
+     * ??U RA PI CHUA B?O H?A
+     * =====================================================
+     */
+    float ratio_cv_unsat =
+        ratio_ff +
+        CV_KP * err_v +
+        cv_i_new;
+
+    float ratio_cc_unsat =
+        ratio_ff +
+        CC_KP * err_i +
+        cc_i_new;
+
+    /*
+     * =====================================================
+     * ANTI-WINDUP CV
+     * =====================================================
+     */
+    if(!((ratio_cv_unsat > RATIO_MAX &&
+          err_v > 0.0f) ||
+         (ratio_cv_unsat < RATIO_MIN &&
+          err_v < 0.0f)))
     {
         cv_i = cv_i_new;
     }
 
-    if(!((ratio_cc_unsat > RATIO_MAX && err_i > 0.0f) ||
-         (ratio_cc_unsat < RATIO_MIN && err_i < 0.0f)))
+    /*
+     * =====================================================
+     * ANTI-WINDUP CC
+     * =====================================================
+     */
+    if(!((ratio_cc_unsat > RATIO_MAX &&
+          err_i > 0.0f) ||
+         (ratio_cc_unsat < RATIO_MIN &&
+          err_i < 0.0f)))
     {
         cc_i = cc_i_new;
     }
 
-    ratio_cv = clampf(ratio_ff + CV_KP * err_v + cv_i, RATIO_MIN, RATIO_MAX);
-    ratio_cc = clampf(ratio_ff + CC_KP * err_i + cc_i, RATIO_MIN, RATIO_MAX);
+    /*
+     * T?nh l?i output b?ng gi? tr? t?ch ph?n d? du?c ch?p nh?n.
+     */
+    float ratio_cv =
+        ratio_ff +
+        CV_KP * err_v +
+        cv_i;
 
+    float ratio_cc =
+        ratio_ff +
+        CC_KP * err_i +
+        cc_i;
+
+    ratio_cv =
+        clampf(ratio_cv, RATIO_MIN, RATIO_MAX);
+
+    ratio_cc =
+        clampf(ratio_cc, RATIO_MIN, RATIO_MAX);
+
+    /*
+     * =====================================================
+     * CH?N V?NG ?I?U KHI?N CH?T HON
+     * =====================================================
+     *
+     * Gi? tr? ratio nh? hon s? h?n ch? c?ng su?t nhi?u hon.
+     */
     if(ratio_cc < ratio_cv)
     {
         ratio_out = ratio_cc;
@@ -618,7 +880,9 @@ void PowerStage_CloseLoop_CVCC_1kHz(void)
         PowerStage.state = BBUI_STATE_CV;
     }
 
-    ratio_out = clampf(ratio_out, RATIO_MIN, RATIO_MAX);
+    ratio_out =
+        clampf(ratio_out, RATIO_MIN, RATIO_MAX);
+
     PowerStage_SetRatio(ratio_out);
 }
 void Buck_UI_Init(void)
@@ -641,7 +905,7 @@ void handle_temp(){
 		if(HAL_GetTick() -  lastTime_readTemp > 2000)
 		{
 			lastTime_readTemp = HAL_GetTick();
-			float temp_new = Read_NTC_Temp() + 32.4f;
+			float temp_new = Read_NTC_Temp();
 			PowerStage.temp = PowerStage.temp * 0.5f + temp_new * 0.5f;
 			if(PowerStage.temp >= 40.0f)
 			{
@@ -656,123 +920,25 @@ void handle_temp(){
 }
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
-  /* Prevent unused argument(s) compilation warning */
-  UNUSED(htim);
-	float vin_new = Read_Vin(adc_avg[3]);
-	float vout_new = Read_Vout(adc_avg[0]);
-	float current_new = Read_Current(adc_avg[1]);
-	PowerStage.vin = PowerStage.vin * 0.9f + vin_new * 0.1f;
-	PowerStage.vout = PowerStage.vout * 0.9f + vout_new * 0.1f;
-  PowerStage.current = PowerStage.current * 0.9f + current_new * 0.1f;
-	if(PowerStage.enable == 0)
-	{
-			PowerStage.state = BBUI_STATE_OFF;
-			PowerStage_Stop();
-			return;
-	}
-
-	if(PowerStage.enable == 0)
-	{
-			PowerStage.state = BBUI_STATE_FAULT;
-			PowerStage.enable = 0;
-			PowerStage_Stop();
-			return;
-	}
-	PowerStage_CloseLoop_CVCC_1kHz();
-	if(PowerStage.current >= PowerStage.iset - 0.05f)
-	{
-			PowerStage.state = BBUI_STATE_CC;
-	}
-	else
-	{
-			PowerStage.state = BBUI_STATE_CV;
-	}
-	
-	if(PowerStage.enable == 0)
-	{
-			PowerStage_Stop();
-			return;
-	}
-
-
-//	BuckBoost_CV_Control_1kHz();
-	
-//	PowerStage_Control_OpenLoop();
-  /* NOTE : This function should not be modified, when the callback is needed,
-            the HAL_TIM_PeriodElapsedCallback could be implemented in the user file
-   */
-}
-void Test_UI_Solider_SetData_Task(void)
-{
-    static uint8_t init = 0;
-    static uint32_t last_tick = 0;
-
-    static float tip_temp = 25.0f;
-    static float current = 0.0f;
-    static float fet_temp = 30.0f;
-    static float power = 0.0f;
-
-    if(init == 0)
-    {
-        init = 1;
-        UI_Solider_Enter();
-    }
-
-    if(HAL_GetTick() - last_tick < 100)
+    if(htim->Instance != TIM3)
         return;
 
-    last_tick = HAL_GetTick();
+    /* Update measurements first. */
+    float vin_new = Read_Vin(adc_avg[3]);
+    float vout_new = Read_Vout(adc_avg[0]);
+    float current_new = Read_Current(adc_avg[1]);
 
-    float set_temp = UI_Solider_GetSetTemp();
+    PowerStage.vin += 0.5f * (vin_new - PowerStage.vin);
+    PowerStage.vout += 0.5f * (vout_new - PowerStage.vout);
+    PowerStage.current += 0.5f * (current_new - PowerStage.current);
 
-    if(tip_temp < set_temp)
-    {
-        float err = set_temp - tip_temp;
+    /* Learn the actual source voltage while output is off. */
+    PowerStage_UpdateIdleVinReference();
 
-        if(err > 80.0f)
-            tip_temp += 6.0f;
-        else if(err > 30.0f)
-            tip_temp += 3.0f;
-        else if(err > 5.0f)
-            tip_temp += 1.0f;
-        else
-            tip_temp += 0.2f;
-    }
-    else
-    {
-        tip_temp -= 0.3f;
-    }
-
-    if(tip_temp < 25.0f)
-        tip_temp = 25.0f;
-
-    float err_abs = set_temp - tip_temp;
-
-    if(err_abs < 0.0f)
-        err_abs = -err_abs;
-
-    if(err_abs > 80.0f)
-        current = 4.5f;
-    else if(err_abs > 40.0f)
-        current = 3.2f;
-    else if(err_abs > 15.0f)
-        current = 1.8f;
-    else if(err_abs > 5.0f)
-        current = 0.8f;
-    else
-        current = 0.25f;
-
-    fet_temp = fet_temp * 0.98f + (30.0f + current * 12.0f) * 0.02f;
-
-    power = current * 24.0f;
-
-    UI_Solider_SetData(tip_temp,
-                       current,
-                       fet_temp,
-                       power);
-
-    UI_Solider_Task(0);
+    /* CloseLoop handles OFF, protection, CV, CC and Vin-droop limiting. */
+    PowerStage_CloseLoop_CVCC_1kHz();
 }
+
 volatile uint16_t solider_temp = 0;
 #define ADC_AVG_SAMPLES 36
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
@@ -859,7 +1025,9 @@ int main(void)
 //	HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_3);
 //	TIM1 -> CCR3 = 100;
 	HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
-	
+	HAL_GPIO_WritePin(GPIOB,
+                  GPIO_PIN_15,
+                  GPIO_PIN_SET);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -1115,7 +1283,7 @@ static void MX_TIM1_Init(void)
 
   /* USER CODE END TIM1_Init 1 */
   htim1.Instance = TIM1;
-  htim1.Init.Prescaler = 2;
+  htim1.Init.Prescaler = 4;
   htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim1.Init.Period = 1000;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;

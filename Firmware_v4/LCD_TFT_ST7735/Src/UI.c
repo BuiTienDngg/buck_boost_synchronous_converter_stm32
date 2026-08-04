@@ -22,7 +22,7 @@
 
 #define UI_FLASH_PAGE_ADDR         0x0800FC00U
 #define UI_FLASH_MAGIC             0xBABA2026U
-#define UI_FLASH_VERSION           1U
+#define UI_FLASH_VERSION           2U
 
 #define BTN_ACTIVE                 GPIO_PIN_RESET
 #define BTN_DEBOUNCE_MS            35
@@ -54,10 +54,20 @@
 
 #define SWITCH_PIN GPIO_PIN_15
 #define SWITCH_PORT GPIOB
+
+#define SOLDER_BB_VSET          24.0f
+#define SOLDER_BB_ISET          7.0f
+
+#define UI_ENCODER_LONG_PRESS_MS    1000U
+
+#define MAX_INPUT_POWER_MIN         20.0f
+#define MAX_INPUT_POWER_MAX         500.0f
+#define MAX_INPUT_POWER_STEP        5.0f
 typedef enum
 {
     UI_SCREEN_POWER = 0,
-    UI_SCREEN_SOLDER
+    UI_SCREEN_SOLDER,
+		UI_SCREEN_SETTINGS
 } UI_Screen_t;
 typedef enum
 {
@@ -65,7 +75,12 @@ typedef enum
     UI_SELECT_VSET,
     UI_SELECT_ISET
 } UI_Select_t;
-
+typedef enum
+{
+    SETTINGS_ITEM_MAX_POWER = 0,
+    SETTINGS_ITEM_START_MODE,
+    SETTINGS_ITEM_COUNT
+} UI_SettingsItem_t;
 typedef struct
 {
     uint32_t magic;
@@ -73,6 +88,9 @@ typedef struct
 
     float vset;
     float iset;
+
+    float max_input_power;
+    uint32_t start_mode;
 
     uint32_t checksum;
 } UI_FlashData_t;
@@ -87,7 +105,10 @@ typedef struct
 static UI_Screen_t ui_screen = UI_SCREEN_POWER;
 static BBUI_Data_t *ui = 0;
 static TIM_HandleTypeDef *enc_tim = 0;
+static UI_SettingsItem_t settings_item = SETTINGS_ITEM_MAX_POWER;
+static uint8_t settings_editing = 0;
 
+static UI_Screen_t settings_return_screen = UI_SCREEN_POWER;
 static UI_Select_t ui_select = UI_SELECT_NONE;
 
 static int16_t enc_last = 0;
@@ -99,7 +120,9 @@ static uint32_t t_lcd = 0;
 
 static uint8_t v_digit = 1;
 static uint8_t i_digit = 1;
-
+static uint8_t enc_button_down = 0;
+static uint8_t enc_long_handled = 0;
+static uint32_t enc_button_down_tick = 0;
 static const float v_step_table[] =
 {
     0.01f,
@@ -159,7 +182,9 @@ static char c_iron_temp[32] = "";
 static char c_iron_pwm[32] = "";
 static char c_iron_out[16] = "";
 
-
+static float power_vset_backup = 12.0f;
+static float power_iset_backup = 2.0f;
+static uint8_t power_enable_backup = 0;
 static uint8_t disp_init = 0;
 static uint32_t t_disp_filter = 0;
 
@@ -385,7 +410,13 @@ void BBUI_LoadFromFlash(void)
 
     ui->vset = clampf(fd->vset, VSET_MIN, VSET_MAX);
     ui->iset = clampf(fd->iset, ISET_MIN, ISET_MAX);
+		ui->max_input_power = clampf(fd->max_input_power,
+           MAX_INPUT_POWER_MIN,
+           MAX_INPUT_POWER_MAX);
 
+		ui->start_mode = fd->start_mode == BB_START_HARD
+				? BB_START_HARD
+				: BB_START_SOFT;
     ui->enable = 0;
     ui->state = BBUI_STATE_OFF;
 
@@ -404,7 +435,8 @@ void BBUI_SaveToFlash(void)
     fd.version = UI_FLASH_VERSION;
     fd.vset = ui->vset;
     fd.iset = ui->iset;
-
+		fd.max_input_power = ui->max_input_power;
+		fd.start_mode = ui->start_mode;
     uint32_t words = (sizeof(UI_FlashData_t) - sizeof(uint32_t)) / 4;
     fd.checksum = UI_Checksum32((uint32_t*)&fd, words);
 
@@ -875,31 +907,173 @@ static void UpdateMain(uint8_t force)
                     force);
     }
 }
+static void DrawSettingsBase(void)
+{
+    ST7735_FillScreen(ST7735_BLACK);
+
+    ST7735_WriteString(31,
+                       4,
+                       "SETTINGS",
+                       UI_FONT_MEDIUM,
+                       ST7735_CYAN,
+                       ST7735_BLACK);
+
+    drawHline(0, 25, 127, ST7735_BLUE);
+
+    ST7735_WriteString(12,
+                       40,
+                       "MAX INPUT POWER",
+                       UI_FONT_SMALL,
+                       ST7735_WHITE,
+                       ST7735_BLACK);
+
+    ST7735_WriteString(12,
+                       87,
+                       "START MODE",
+                       UI_FONT_SMALL,
+                       ST7735_WHITE,
+                       ST7735_BLACK);
+
+    drawHline(0, 132, 127, ST7735_BLUE);
+
+    ST7735_WriteString(5,
+                       143,
+                       "HOLD:EXIT PRESS:EDIT",
+                       UI_FONT_SMALL,
+                       ST7735_BLUE,
+                       ST7735_BLACK);
+}
+static void UpdateSettings(uint8_t force)
+{
+    char buf[32];
+
+    uint16_t power_color =
+        settings_item == SETTINGS_ITEM_MAX_POWER
+        ? ST7735_RED
+        : ST7735_WHITE;
+
+    uint16_t start_color =
+        settings_item == SETTINGS_ITEM_START_MODE
+        ? ST7735_RED
+        : ST7735_WHITE;
+
+    /*
+     * X?a v? v? con tr?.
+     */
+    ST7735_FillRectangle(0, 35, 10, 80, ST7735_BLACK);
+
+    if(settings_item == SETTINGS_ITEM_MAX_POWER)
+        ST7735_WriteString(2, 55, ">", UI_FONT_SMALL,
+                           ST7735_RED, ST7735_BLACK);
+    else
+        ST7735_WriteString(2, 102, ">", UI_FONT_SMALL,
+                           ST7735_RED, ST7735_BLACK);
+
+    sprintf(buf, "%03ld W",
+            (long)(ui->max_input_power + 0.5f));
+
+    ST7735_FillRectangle(28, 54, 80, 20, ST7735_BLACK);
+
+    ST7735_WriteString(28,
+                       54,
+                       buf,
+                       UI_FONT_MEDIUM,
+                       power_color,
+                       ST7735_BLACK);
+
+    ST7735_FillRectangle(35, 100, 65, 20, ST7735_BLACK);
+
+    if(ui->start_mode == BB_START_SOFT)
+    {
+        ST7735_WriteString(35,
+                           100,
+                           "SOFT",
+                           UI_FONT_MEDIUM,
+                           start_color,
+                           ST7735_BLACK);
+    }
+    else
+    {
+        ST7735_WriteString(35,
+                           100,
+                           "HARD",
+                           UI_FONT_MEDIUM,
+                           start_color,
+                           ST7735_BLACK);
+    }
+
+    /*
+     * Khi dang ch?nh, th?m d?u ngo?c.
+     */
+    if(settings_editing)
+    {
+        if(settings_item == SETTINGS_ITEM_MAX_POWER)
+        {
+            ST7735_WriteString(18, 54, "[",
+                               UI_FONT_MEDIUM,
+                               ST7735_YELLOW,
+                               ST7735_BLACK);
+
+            ST7735_WriteString(105, 54, "]",
+                               UI_FONT_MEDIUM,
+                               ST7735_YELLOW,
+                               ST7735_BLACK);
+        }
+        else
+        {
+            ST7735_WriteString(25, 100, "[",
+                               UI_FONT_MEDIUM,
+                               ST7735_YELLOW,
+                               ST7735_BLACK);
+
+            ST7735_WriteString(85, 100, "]",
+                               UI_FONT_MEDIUM,
+                               ST7735_YELLOW,
+                               ST7735_BLACK);
+        }
+    }
+}
 static void EncoderButtonPress(void)
 {
+    if(ui_screen == UI_SCREEN_SETTINGS)
+    {
+        /*
+         * Nh?n ng?n: v?o/tho?t ch? d? ch?nh m?c hi?n t?i.
+         */
+        settings_editing = !settings_editing;
+
+        force_redraw = 1;
+        dirty = 1;
+        return;
+    }
+
+    if(UI_Solider_IsActive())
+    {
+        /*
+         * Gi? logic hi?n t?i c?a Solder n?u c?.
+         */
+        return;
+    }
+
+    /*
+     * Logic ch?nh ch? s? Vset/Iset hi?n t?i.
+     */
     if(ui_select == UI_SELECT_VSET)
     {
         v_digit++;
 
-        if(v_digit >= 4)
+        if(v_digit >= sizeof(v_step_table) / sizeof(v_step_table[0]))
             v_digit = 0;
-
-        c_p[0] = 0;
-        c_set_tag[0] = 0;
-        dirty = 1;
     }
     else if(ui_select == UI_SELECT_ISET)
     {
         i_digit++;
 
-        if(i_digit >= 3)
+        if(i_digit >= sizeof(i_step_table) / sizeof(i_step_table[0]))
             i_digit = 0;
-
-        c_p[0] = 0;
-        c_iset[0] = 0;
-        c_set_tag[0] = 0;
-        dirty = 1;
     }
+
+    dirty = 1;
 }
 static uint8_t ButtonPressedEvent(UI_Button_t *btn)
 {
@@ -973,7 +1147,13 @@ static void ButtonTask(void)
 				}
 				else
 				{
-						ui->enable = !ui->enable;
+                        if(ui->enable == 0U)
+                        {
+                            /* Default relay path must be POWER before starting BB. */
+                            HAL_GPIO_WritePin(SWITCH_PORT, SWITCH_PIN, GPIO_PIN_SET);
+                        }
+
+                        ui->enable = !ui->enable;
 
 						if(ui->enable)
 						{
@@ -985,7 +1165,6 @@ static void ButtonTask(void)
 								ui->state = BBUI_STATE_OFF;
 						}
 
-						BBUI_SaveToFlash();
 
 						ClearCache();
 						dirty = 1;
@@ -1014,33 +1193,142 @@ static void ButtonTask(void)
 //						dirty = 1;
 //				}
 //		}
-		if(ButtonPressedEvent(&btn_mode))
-		{
-				if(UI_Solider_IsActive())
-				{
-						UI_Solider_Exit();
-						force_redraw = 1;
-						dirty = 1;
-					HAL_GPIO_WritePin(SWITCH_PORT, SWITCH_PIN, 1);
-				}
-				else
-				{
-						UI_Solider_Enter();
-						force_redraw = 1;
-						dirty = 1;
-					HAL_GPIO_WritePin(SWITCH_PORT, SWITCH_PIN, 0);
-				}
-		}
-		if(ButtonPressedEvent(&btn_enc))
-		{
-				EncoderButtonPress();
-		}
+			if(ButtonPressedEvent(&btn_mode))
+			{
+					/*
+					 * Khi dang trong menu Settings, n?t MODE kh?ng d?i m?n h?nh.
+					 * Gi? encoder d? tho?t Settings.
+					 */
+					if(ui_screen == UI_SCREEN_SETTINGS)
+							return;
+
+					/*
+					 * =====================================================
+					 * SOLDER -> POWER
+					 * =====================================================
+					 */
+					if(ui_screen == UI_SCREEN_SOLDER)
+					{
+							UI_Solider_Exit();
+
+							/*
+							 * Kh?i ph?c c?u h?nh ngu?n tru?c khi v?o Solder.
+							 */
+							ui->vset = power_vset_backup;
+							ui->iset = power_iset_backup;
+							ui->enable = power_enable_backup;
+
+							if(ui->enable)
+							{
+									ui->state = BBUI_STATE_CV;
+							}
+							else
+							{
+									ui->state = BBUI_STATE_OFF;
+							}
+
+							/*
+							 * Chuy?n relay/m?ch c?ng su?t v? ch? d? ngu?n.
+							 */
+							HAL_GPIO_WritePin(SWITCH_PORT,
+																SWITCH_PIN,
+																GPIO_PIN_SET);
+
+							ui_screen = UI_SCREEN_POWER;
+					}
+
+					/*
+					 * =====================================================
+					 * POWER -> SOLDER
+					 * =====================================================
+					 */
+					else
+					{
+							/*
+							 * Luu c?u h?nh ngu?n hi?n t?i d? kh?i ph?c
+							 * khi tho?t ch? d? Solder.
+							 */
+							power_vset_backup = ui->vset;
+							power_iset_backup = ui->iset;
+							power_enable_backup = ui->enable;
+
+							/*
+							 * C?u h?nh buck-boost cho m? h?n:
+							 * 24 V, gi?i h?n d?ng 7 A.
+							 */
+							ui->vset = 24.0f;
+							ui->iset = 7.0f;
+							ui->enable = 1;
+							ui->state = BBUI_STATE_CV;
+
+							/*
+							 * Chuy?n relay/m?ch c?ng su?t sang m? h?n.
+							 */
+							HAL_GPIO_WritePin(SWITCH_PORT,
+																SWITCH_PIN,
+																GPIO_PIN_RESET);
+
+							UI_Solider_Enter();
+
+							ui_screen = UI_SCREEN_SOLDER;
+					}
+
+					ClearCache();
+
+					force_redraw = 1;
+					dirty = 1;
+			}
+//		if(ButtonPressedEvent(&btn_enc))
+//		{
+//				EncoderButtonPress();
+//		}
 }
 
 static void EncoderAdjust(int8_t dir)
 {
     if(ui == 0 || dir == 0)
         return;
+		if(ui_screen == UI_SCREEN_SETTINGS)
+    {
+        if(settings_editing == 0)
+        {
+            int item = (int)settings_item + dir;
+
+            if(item < 0)
+                item = SETTINGS_ITEM_COUNT - 1;
+
+            if(item >= SETTINGS_ITEM_COUNT)
+                item = 0;
+
+            settings_item = (UI_SettingsItem_t)item;
+        }
+        else
+        {
+            if(settings_item == SETTINGS_ITEM_MAX_POWER)
+            {
+                ui->max_input_power +=
+                    dir * MAX_INPUT_POWER_STEP;
+
+                ui->max_input_power =
+                    clampf(ui->max_input_power,
+                           MAX_INPUT_POWER_MIN,
+                           MAX_INPUT_POWER_MAX);
+            }
+            else if(settings_item == SETTINGS_ITEM_START_MODE)
+            {
+                if(dir != 0)
+                {
+                    ui->start_mode =
+                        ui->start_mode == BB_START_SOFT
+                        ? BB_START_HARD
+                        : BB_START_SOFT;
+                }
+            }
+        }
+
+        dirty = 1;
+        return;
+    }
 		if(UI_Solider_IsActive())
 		{
 				UI_Solider_EncoderAdjust(dir);
@@ -1084,7 +1372,84 @@ static void EncoderAdjust(int8_t dir)
 				return;
 		}
 }
+static void EncoderButtonTask(void)
+{
+    uint8_t pressed =
+        HAL_GPIO_ReadPin(BTN_ENC_PORT, BTN_ENC_PIN) == BTN_ACTIVE;
 
+    uint32_t now = HAL_GetTick();
+
+    if(pressed)
+    {
+        if(enc_button_down == 0)
+        {
+            enc_button_down = 1;
+            enc_long_handled = 0;
+            enc_button_down_tick = now;
+        }
+        else if(enc_long_handled == 0 &&
+                now - enc_button_down_tick >= UI_ENCODER_LONG_PRESS_MS)
+        {
+            enc_long_handled = 1;
+
+            if(ui_screen == UI_SCREEN_SETTINGS)
+            {
+                /*
+                 * Tho?t menu v? luu c?u h?nh.
+                 */
+                BBUI_SaveToFlash();
+
+                ui_screen = settings_return_screen;
+
+                if(ui_screen == UI_SCREEN_SOLDER)
+                    UI_Solider_Enter();
+
+                force_redraw = 1;
+                dirty = 1;
+            }
+            else
+            {
+                /*
+                 * Nh? m?n h?nh tru?c d?.
+                 */
+                settings_return_screen =
+                    UI_Solider_IsActive()
+                    ? UI_SCREEN_SOLDER
+                    : UI_SCREEN_POWER;
+
+                /*
+                 * T?m tho?t UI Solder d? BBUI_Task
+                 * kh?ng return tru?c khi v? Settings.
+                 */
+                if(UI_Solider_IsActive())
+                    UI_Solider_Exit();
+
+                ui_screen = UI_SCREEN_SETTINGS;
+                settings_item = SETTINGS_ITEM_MAX_POWER;
+                settings_editing = 0;
+
+                force_redraw = 1;
+                dirty = 1;
+            }
+        }
+    }
+    else
+    {
+        if(enc_button_down)
+        {
+            /*
+             * Ch? x? l? nh?n ng?n n?u chua k?ch ho?t nh?n gi?.
+             */
+            if(enc_long_handled == 0)
+            {
+                EncoderButtonPress();
+            }
+
+            enc_button_down = 0;
+            enc_long_handled = 0;
+        }
+    }
+}
 static void EncoderTask(void)
 {
     if(enc_tim == 0)
@@ -1155,8 +1520,11 @@ void BBUI_Init(BBUI_Data_t *data, TIM_HandleTypeDef *htim_encoder)
 
     ST7735_Init();
 
-		ui_screen = UI_SCREEN_POWER;
-		ui_select = UI_SELECT_NONE;
+        ui_screen = UI_SCREEN_POWER;
+        ui_select = UI_SELECT_NONE;
+
+        /* At boot, connect the output to the normal BB path. */
+        HAL_GPIO_WritePin(SWITCH_PORT, SWITCH_PIN, GPIO_PIN_SET);
 
 		force_redraw = 1;
 		dirty = 1;
@@ -1168,48 +1536,134 @@ void BBUI_Init(BBUI_Data_t *data, TIM_HandleTypeDef *htim_encoder)
 
 void BBUI_Task(void)
 {
+    uint32_t now = HAL_GetTick();
+
+    /*
+     * X? l? nh?n gi?/nh?n ng?n encoder.
+     *
+     * EncoderButtonTask() ph?i thay th? ph?n:
+     * if(ButtonPressedEvent(&btn_enc))
+     *     EncoderButtonPress();
+     *
+     * trong ButtonTask(), d? nh?n gi? kh?ng d?ng th?i
+     * b? nh?n th?nh m?t l?n nh?n ng?n.
+     */
+    EncoderButtonTask();
+
+    /*
+     * X? l? c?c n?t VSET, ISET, OUT, MODE.
+     */
     ButtonTask();
+
+    /*
+     * ??c encoder xoay.
+     * EncoderAdjust() ph?i c? nh?nh x? l? SETTINGS.
+     */
     EncoderTask();
-		if(UI_Solider_IsActive())
-		{
-				UI_Solider_Task(force_redraw);
 
-				if(force_redraw)
-						force_redraw = 0;
-
-				return;
-		}
+    /*
+     * ??ng b? tr?ng th?i ON/OFF c?a ngu?n.
+     * Ngu?n v?n ti?p t?c ho?t d?ng khi dang m? menu Settings.
+     */
     ApplyOutputState();
 
+    /*
+     * =====================================================
+     * SCREEN: SETTINGS
+     * =====================================================
+     *
+     * Ph?i ki?m tra SETTINGS tru?c SOLDER.
+     * N?u kh?ng, m?n h?nh Solder c? th? chi?m quy?n c?p nh?t LCD.
+     */
+    if(ui_screen == UI_SCREEN_SETTINGS)
+    {
+        if(force_redraw)
+        {
+            force_redraw = 0;
+            dirty = 0;
+            t_lcd = now;
+
+            ClearCache();
+            DrawSettingsBase();
+            UpdateSettings(1);
+
+            return;
+        }
+
+        if(dirty ||
+           (uint32_t)(now - t_lcd) >= UI_LCD_PERIOD_MS)
+        {
+            t_lcd = now;
+            dirty = 0;
+
+            UpdateSettings(0);
+        }
+
+        return;
+    }
+
+    /*
+     * =====================================================
+     * SCREEN: SOLDER
+     * =====================================================
+     */
+    if(ui_screen == UI_SCREEN_SOLDER)
+    {
+        /*
+         * B?o d?m module UI Solder dang active.
+         * Th?ng thu?ng UI_Solider_Enter() d? du?c g?i
+         * khi chuy?n m?n h?nh.
+         */
+        if(!UI_Solider_IsActive())
+        {
+            UI_Solider_Enter();
+            force_redraw = 1;
+        }
+
+        UI_Solider_Task(force_redraw);
+
+        if(force_redraw)
+            force_redraw = 0;
+
+        return;
+    }
+
+    /*
+     * N?u dang ? Power nhung module Solder v?n active
+     * do chuy?n tr?ng th?i chua d?ng b?, t?t n? t?i d?y.
+     */
+    if(UI_Solider_IsActive())
+    {
+        UI_Solider_Exit();
+        force_redraw = 1;
+    }
+
+    /*
+     * =====================================================
+     * SCREEN: POWER
+     * =====================================================
+     */
     if(force_redraw)
-		{
-				force_redraw = 0;
-				dirty = 0;
+    {
+        force_redraw = 0;
+        dirty = 0;
+        t_lcd = now;
 
-				if(ui_screen == UI_SCREEN_POWER)
-				{
-						DrawMainBase();
-						UpdateMain(1);
-				}
-				else
-				{
-						DrawSolderBase();
-						UpdateSolder(1);
-				}
+        ClearCache();
+        DrawMainBase();
+        UpdateMain(1);
 
-				return;
-		}
+        return;
+    }
 
-    if(dirty || HAL_GetTick() - t_lcd >= UI_LCD_PERIOD_MS)
-		{
-				t_lcd = HAL_GetTick();
-				dirty = 0;
+    if(dirty ||
+       (uint32_t)(now - t_lcd) >= UI_LCD_PERIOD_MS)
+    {
+        t_lcd = now;
+        dirty = 0;
 
-				if(ui_screen == UI_SCREEN_POWER)
-						UpdateMain(0);
-				else
-						UpdateSolder(0);
-		}
+        UpdateMain(0);
+    }
 }
 
 void handleUI(void)

@@ -34,7 +34,8 @@ typedef struct
     uint8_t batt_cells;
     uint8_t active_preset;
     uint8_t mqtt_enable;
-
+		float max_input_power;
+		uint8_t start_mode;
     BBUI_Preset_t preset[3];
 } BBUI_Data_t;
 typedef enum
@@ -46,7 +47,11 @@ typedef enum
     MAIN_COUNT,
 		MAIN_OUT_OFF
 } UI_MainField_t;
-
+typedef enum
+{
+    BB_START_SOFT = 0,
+    BB_START_HARD
+} BB_StartMode_t;
 void BBUI_Init(BBUI_Data_t *data, TIM_HandleTypeDef *htim_encoder);
 void BBUI_Task(void);
 void BBUI_ButtonIRQ(void);

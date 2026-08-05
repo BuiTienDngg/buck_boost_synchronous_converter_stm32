@@ -1,0 +1,400 @@
+build:
+  generated-by: csolution version 2.14.1+p38-gf512b381
+  solution: ../../../ST7735.csolution.yml
+  project: ../../../ST7735.cproject.yml
+  context: ST7735+ST7735
+  compiler: AC6@6.23.0
+  device: STMicroelectronics::STM32F103C8
+  device-pack: Keil::STM32F1xx_DFP@2.4.1
+  device-books:
+    - name: ${CMSIS_PACK_ROOT}/Keil/STM32F1xx_DFP/2.4.1/Documents/CD00161566.pdf
+      title: STM32F103x8 STM32F103xB Data Sheet
+    - name: ${CMSIS_PACK_ROOT}/Keil/STM32F1xx_DFP/2.4.1/Documents/CD00171190.pdf
+      title: STM32F101xx, STM32F102xx, STM32F103xx, STM32F105xx, STM32F107xx Reference Manual
+    - name: ${CMSIS_PACK_ROOT}/Keil/STM32F1xx_DFP/2.4.1/Documents/dui0552a_cortex_m3_dgug.pdf
+      title: Cortex-M3 Generic User Guide
+  dbgconf:
+    - file: ../../../.cmsis/ST7735+ST7735.dbgconf
+      version: 1.0.0
+  processor:
+    endian: little
+    fpu: off
+    core: Cortex-M3
+  packs:
+    - pack: ARM::CMSIS@6.3.0
+      path: ${CMSIS_PACK_ROOT}/ARM/CMSIS/6.3.0
+    - pack: Keil::STM32F1xx_DFP@2.4.1
+      path: ${CMSIS_PACK_ROOT}/Keil/STM32F1xx_DFP/2.4.1
+  optimize: debug
+  debug: on
+  misc:
+    ASM:
+      - -masm=auto
+    C:
+      - -std=c99
+      - -fno-rtti
+      - -funsigned-char
+      - -fshort-enums
+      - -fshort-wchar
+      - -ffunction-sections
+      - -Wno-packed
+      - -Wno-missing-variable-declarations
+      - -Wno-missing-prototypes
+      - -Wno-missing-noreturn
+      - -Wno-sign-conversion
+      - -Wno-nonportable-include-path
+      - -Wno-reserved-id-macro
+      - -Wno-unused-macros
+      - -Wno-documentation-unknown-command
+      - -Wno-documentation
+      - -Wno-license-management
+      - -Wno-parentheses-equality
+    CPP:
+      - -xc++
+      - -std=c++11
+      - -fno-exceptions
+      - -fno-rtti
+      - -funsigned-char
+      - -fshort-enums
+      - -fshort-wchar
+      - -ffunction-sections
+      - -Wno-packed
+      - -Wno-missing-variable-declarations
+      - -Wno-missing-prototypes
+      - -Wno-missing-noreturn
+      - -Wno-sign-conversion
+      - -Wno-nonportable-include-path
+      - -Wno-reserved-id-macro
+      - -Wno-unused-macros
+      - -Wno-documentation-unknown-command
+      - -Wno-documentation
+      - -Wno-license-management
+      - -Wno-parentheses-equality
+    Link:
+      - --library_type=microlib
+      - --map
+      - --load_addr_map_info
+      - --xref
+      - --callgraph
+      - --symbols
+      - --info sizes
+      - --info totals
+      - --info unused
+      - --info veneers
+      - --strict
+      - --summary_stderr
+      - --info summarysizes
+  define:
+    - USE_HAL_DRIVER
+    - STM32F103xB
+    - __MICROLIB
+    - STM32F10X_MD
+    - _RTE_
+  define-asm:
+    - __MICROLIB
+    - STM32F10X_MD
+    - _RTE_
+  add-path:
+    - ../../../../Inc
+    - ../../../../Drivers/STM32F1xx_HAL_Driver/Inc
+    - ../../../../Drivers/STM32F1xx_HAL_Driver/Inc/Legacy
+    - ../../../../Drivers/CMSIS/Device/ST/STM32F1xx/Include
+    - ../../../../Drivers/CMSIS/Include
+    - ../../../../ST7735_LCD_TFT
+    - ../../../../SYSTEM
+    - ../../../../Middlewares/ST/STM32_USB_Device_Library/Core/Inc
+    - ../../../../Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Inc
+    - ../../../RTE/_ST7735
+    - ${CMSIS_PACK_ROOT}/ARM/CMSIS/6.3.0/CMSIS/Core/Include
+    - ${CMSIS_PACK_ROOT}/Keil/STM32F1xx_DFP/2.4.1/Device/Include
+  add-path-asm:
+    - ../../../RTE/_ST7735
+    - ${CMSIS_PACK_ROOT}/ARM/CMSIS/6.3.0/CMSIS/Core/Include
+    - ${CMSIS_PACK_ROOT}/Keil/STM32F1xx_DFP/2.4.1/Device/Include
+  output-dirs:
+    intdir: ../../../tmp
+    outdir: .
+    rtedir: ../../../RTE
+  output:
+    - type: elf
+      file: ST7735.axf
+    - type: comp-db
+      file: compile_commands.json
+    - type: comp-db
+      file: compile_macros.h
+  components:
+    - component: ARM::CMSIS:CORE@6.2.0
+      condition: ARMv6_7_8-M Device
+      from-pack: ARM::CMSIS@6.3.0
+      selected-by: ARM::CMSIS:CORE
+      files:
+        - file: ${CMSIS_PACK_ROOT}/ARM/CMSIS/6.3.0/CMSIS/Core/Include
+          category: include
+          version: 6.2.0
+        - file: ${CMSIS_PACK_ROOT}/ARM/CMSIS/6.3.0/CMSIS/Core/Include/tz_context.h
+          category: header
+          version: 6.2.0
+        - file: ${CMSIS_PACK_ROOT}/ARM/CMSIS/6.3.0/CMSIS/Core/Template/ARMv8-M/main_s.c
+          category: sourceC
+          attr: template
+          version: 1.1.1
+          select: Secure mode 'main' module for ARMv8-M
+        - file: ${CMSIS_PACK_ROOT}/ARM/CMSIS/6.3.0/CMSIS/Core/Template/ARMv8-M/tz_context.c
+          category: sourceC
+          attr: template
+          version: 1.1.1
+          select: RTOS Context Management (TrustZone for ARMv8-M)
+        - file: ${CMSIS_PACK_ROOT}/ARM/CMSIS/6.3.0/CMSIS/Documentation/html/Core/index.html
+          category: doc
+          version: 6.2.0
+  linker:
+    script: ../../../ST7735_ST7735.sct
+  groups:
+    - group: Application/MDK-ARM
+      files:
+        - file: ../../../startup_stm32f103xb.s
+          category: sourceAsm
+          misc:
+            ASM:
+              - -masm=auto
+        - file: ../../../../Src/UI.c
+          category: sourceC
+        - file: ../../../../Inc/UI.h
+          category: header
+        - file: ../../../../Inc/UI_Solider.h
+          category: header
+        - file: ../../../../Src/UI_Solider.c
+          category: sourceC
+    - group: Application/User
+      files:
+        - file: ../../../../ST7735_LCD_TFT/ST7735_SPI.c
+          category: sourceC
+        - file: ../../../../ST7735_LCD_TFT/fonts.c
+          category: sourceC
+        - file: ../../../../Src/main.c
+          category: sourceC
+        - file: ../../../../Src/usb_device.c
+          category: sourceC
+          misc:
+            CPP:
+              - -xc++
+        - file: ../../../../Src/usbd_conf.c
+          category: sourceC
+          misc:
+            CPP:
+              - -xc++
+        - file: ../../../../Src/usbd_desc.c
+          category: sourceC
+          misc:
+            CPP:
+              - -xc++
+        - file: ../../../../Src/usbd_cdc_if.c
+          category: sourceC
+          misc:
+            CPP:
+              - -xc++
+        - file: ../../../../Src/stm32f1xx_it.c
+          category: sourceC
+        - file: ../../../../Src/stm32f1xx_hal_msp.c
+          category: sourceC
+    - group: Drivers/CMSIS
+      files:
+        - file: ../../../../Src/system_stm32f1xx.c
+          category: sourceC
+    - group: Drivers/STM32F1xx_HAL_Driver
+      misc:
+        C:
+          - -Wno-packed
+          - -Wno-missing-variable-declarations
+          - -Wno-missing-prototypes
+          - -Wno-missing-noreturn
+          - -Wno-sign-conversion
+          - -Wno-nonportable-include-path
+          - -Wno-reserved-id-macro
+          - -Wno-unused-macros
+          - -Wno-documentation-unknown-command
+          - -Wno-documentation
+          - -Wno-license-management
+          - -Wno-parentheses-equality
+          - -Wno-covered-switch-default
+          - -Wno-unreachable-code-break
+        CPP:
+          - -xc++
+          - -fno-exceptions
+          - -Wno-packed
+          - -Wno-missing-variable-declarations
+          - -Wno-missing-prototypes
+          - -Wno-missing-noreturn
+          - -Wno-sign-conversion
+          - -Wno-nonportable-include-path
+          - -Wno-reserved-id-macro
+          - -Wno-unused-macros
+          - -Wno-documentation-unknown-command
+          - -Wno-documentation
+          - -Wno-license-management
+          - -Wno-parentheses-equality
+          - -Wno-covered-switch-default
+          - -Wno-unreachable-code-break
+      files:
+        - file: ../../../../Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_gpio_ex.c
+          category: sourceC
+          misc:
+            CPP:
+              - -xc++
+        - file: ../../../../Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_pcd.c
+          category: sourceC
+          misc:
+            CPP:
+              - -xc++
+        - file: ../../../../Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_pcd_ex.c
+          category: sourceC
+          misc:
+            CPP:
+              - -xc++
+        - file: ../../../../Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_ll_usb.c
+          category: sourceC
+          misc:
+            CPP:
+              - -xc++
+        - file: ../../../../Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal.c
+          category: sourceC
+          misc:
+            CPP:
+              - -xc++
+        - file: ../../../../Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_rcc.c
+          category: sourceC
+          misc:
+            CPP:
+              - -xc++
+        - file: ../../../../Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_rcc_ex.c
+          category: sourceC
+          misc:
+            CPP:
+              - -xc++
+        - file: ../../../../Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_gpio.c
+          category: sourceC
+          misc:
+            CPP:
+              - -xc++
+        - file: ../../../../Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_dma.c
+          category: sourceC
+          misc:
+            CPP:
+              - -xc++
+        - file: ../../../../Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_cortex.c
+          category: sourceC
+          misc:
+            CPP:
+              - -xc++
+        - file: ../../../../Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_pwr.c
+          category: sourceC
+          misc:
+            CPP:
+              - -xc++
+        - file: ../../../../Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_flash.c
+          category: sourceC
+          misc:
+            CPP:
+              - -xc++
+        - file: ../../../../Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_flash_ex.c
+          category: sourceC
+          misc:
+            CPP:
+              - -xc++
+        - file: ../../../../Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_exti.c
+          category: sourceC
+          misc:
+            CPP:
+              - -xc++
+        - file: ../../../../Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_adc.c
+          category: sourceC
+          misc:
+            CPP:
+              - -xc++
+        - file: ../../../../Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_adc_ex.c
+          category: sourceC
+          misc:
+            CPP:
+              - -xc++
+        - file: ../../../../Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_spi.c
+          category: sourceC
+          misc:
+            CPP:
+              - -xc++
+        - file: ../../../../Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_tim.c
+          category: sourceC
+          misc:
+            CPP:
+              - -xc++
+        - file: ../../../../Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_tim_ex.c
+          category: sourceC
+          misc:
+            CPP:
+              - -xc++
+    - group: Middlewares/USB_Device_Library
+      misc:
+        C:
+          - -Wno-packed
+          - -Wno-missing-variable-declarations
+          - -Wno-missing-prototypes
+          - -Wno-missing-noreturn
+          - -Wno-sign-conversion
+          - -Wno-nonportable-include-path
+          - -Wno-reserved-id-macro
+          - -Wno-unused-macros
+          - -Wno-documentation-unknown-command
+          - -Wno-documentation
+          - -Wno-license-management
+          - -Wno-parentheses-equality
+          - -Wno-covered-switch-default
+          - -Wno-unreachable-code-break
+        CPP:
+          - -xc++
+          - -fno-exceptions
+          - -Wno-packed
+          - -Wno-missing-variable-declarations
+          - -Wno-missing-prototypes
+          - -Wno-missing-noreturn
+          - -Wno-sign-conversion
+          - -Wno-nonportable-include-path
+          - -Wno-reserved-id-macro
+          - -Wno-unused-macros
+          - -Wno-documentation-unknown-command
+          - -Wno-documentation
+          - -Wno-license-management
+          - -Wno-parentheses-equality
+          - -Wno-covered-switch-default
+          - -Wno-unreachable-code-break
+      files:
+        - file: ../../../../Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_core.c
+          category: sourceC
+          misc:
+            CPP:
+              - -xc++
+        - file: ../../../../Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_ctlreq.c
+          category: sourceC
+          misc:
+            CPP:
+              - -xc++
+        - file: ../../../../Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_ioreq.c
+          category: sourceC
+          misc:
+            CPP:
+              - -xc++
+        - file: ../../../../Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Src/usbd_cdc.c
+          category: sourceC
+          misc:
+            CPP:
+              - -xc++
+  constructed-files:
+    - file: ../../../RTE/_ST7735/RTE_Components.h
+      category: header
+  licenses:
+    - license: <unknown>
+      packs:
+        - pack: Keil::STM32F1xx_DFP@2.4.1
+    - license: Apache-2.0
+      packs:
+        - pack: ARM::CMSIS@6.3.0
+      components:
+        - component: ARM::CMSIS:CORE@6.2.0

@@ -1,0 +1,8 @@
+D:/My_project/buck_boost_converter/Firmware_v4/LCD_TFT_ST7735/MDK-ARM/tmp/ST7735/default/CMakeFiles/database.dir
+D:/My_project/buck_boost_converter/Firmware_v4/LCD_TFT_ST7735/MDK-ARM/tmp/ST7735/default/CMakeFiles/ST7735+ST7735.dir
+D:/My_project/buck_boost_converter/Firmware_v4/LCD_TFT_ST7735/MDK-ARM/tmp/ST7735/default/CMakeFiles/ST7735+ST7735-build.dir
+D:/My_project/buck_boost_converter/Firmware_v4/LCD_TFT_ST7735/MDK-ARM/tmp/ST7735/default/CMakeFiles/ST7735+ST7735-configure.dir
+D:/My_project/buck_boost_converter/Firmware_v4/LCD_TFT_ST7735/MDK-ARM/tmp/ST7735/default/CMakeFiles/ST7735+ST7735-executes.dir
+D:/My_project/buck_boost_converter/Firmware_v4/LCD_TFT_ST7735/MDK-ARM/tmp/ST7735/default/CMakeFiles/ST7735+ST7735-database.dir
+D:/My_project/buck_boost_converter/Firmware_v4/LCD_TFT_ST7735/MDK-ARM/tmp/ST7735/default/CMakeFiles/edit_cache.dir
+D:/My_project/buck_boost_converter/Firmware_v4/LCD_TFT_ST7735/MDK-ARM/tmp/ST7735/default/CMakeFiles/rebuild_cache.dir

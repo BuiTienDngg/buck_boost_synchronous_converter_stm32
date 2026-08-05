@@ -1,0 +1,12 @@
+# Target labels
+ ST7735+ST7735
+# Source files and their labels
+D:/My_project/buck_boost_converter/Firmware_v4/LCD_TFT_ST7735/MDK-ARM/tmp/ST7735/default/CMakeFiles/ST7735+ST7735-executes
+D:/My_project/buck_boost_converter/Firmware_v4/LCD_TFT_ST7735/MDK-ARM/tmp/ST7735/default/CMakeFiles/ST7735+ST7735-executes.rule
+D:/My_project/buck_boost_converter/Firmware_v4/LCD_TFT_ST7735/MDK-ARM/tmp/ST7735/default/ST7735+ST7735/src/ST7735+ST7735-stamp/ST7735+ST7735-executes.rule
+D:/My_project/buck_boost_converter/Firmware_v4/LCD_TFT_ST7735/MDK-ARM/tmp/ST7735/default/ST7735+ST7735/src/ST7735+ST7735-stamp/ST7735+ST7735-build.rule
+D:/My_project/buck_boost_converter/Firmware_v4/LCD_TFT_ST7735/MDK-ARM/tmp/ST7735/default/ST7735+ST7735/src/ST7735+ST7735-stamp/ST7735+ST7735-configure.rule
+D:/My_project/buck_boost_converter/Firmware_v4/LCD_TFT_ST7735/MDK-ARM/tmp/ST7735/default/ST7735+ST7735/src/ST7735+ST7735-stamp/ST7735+ST7735-patch.rule
+D:/My_project/buck_boost_converter/Firmware_v4/LCD_TFT_ST7735/MDK-ARM/tmp/ST7735/default/ST7735+ST7735/src/ST7735+ST7735-stamp/ST7735+ST7735-update.rule
+D:/My_project/buck_boost_converter/Firmware_v4/LCD_TFT_ST7735/MDK-ARM/tmp/ST7735/default/ST7735+ST7735/src/ST7735+ST7735-stamp/ST7735+ST7735-download.rule
+D:/My_project/buck_boost_converter/Firmware_v4/LCD_TFT_ST7735/MDK-ARM/tmp/ST7735/default/ST7735+ST7735/src/ST7735+ST7735-stamp/ST7735+ST7735-mkdir.rule

@@ -1,0 +1,10 @@
+CompileFlags:
+  CompilationDatabase: d:\My_project\buck_boost_converter\Firmware_v4\LCD_TFT_ST7735\MDK-ARM\out\ST7735\ST7735
+
+---
+If:
+  PathMatch: .*\.(c|C|h)$
+CompileFlags:
+  Add:
+    - -include
+    - d:\My_project\buck_boost_converter\Firmware_v4\LCD_TFT_ST7735\MDK-ARM\out\ST7735\ST7735\compile_macros_c.h

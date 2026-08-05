@@ -1,0 +1,241 @@
+project:
+  packs:
+    - pack: ARM::CMSIS@^6.1.0
+    - pack: Keil::STM32F1xx_DFP@^2.4.1
+    - pack: ARM::CMSIS-NN@^4.0.0
+    - pack: ARM::CMSIS-DSP@^1.10.1
+  setups:
+    - setup: Options for ST7735
+      add-path:
+        - ../Inc
+        - ../Drivers/STM32F1xx_HAL_Driver/Inc
+        - ../Drivers/STM32F1xx_HAL_Driver/Inc/Legacy
+        - ../Drivers/CMSIS/Device/ST/STM32F1xx/Include
+        - ../Drivers/CMSIS/Include
+        - ../ST7735_LCD_TFT
+        - ../SYSTEM
+        - ../Middlewares/ST/STM32_USB_Device_Library/Core/Inc
+        - ../Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Inc
+      debug: "on"
+      define:
+        - USE_HAL_DRIVER
+        - STM32F103xB
+        - __MICROLIB
+      define-asm:
+        - __MICROLIB
+      misc:
+        - C:
+            - -std=c99
+          C-CPP:
+            - -fno-rtti
+            - -funsigned-char
+            - -fshort-enums
+            - -fshort-wchar
+            - -ffunction-sections
+            - -Wno-packed
+            - -Wno-missing-variable-declarations
+            - -Wno-missing-prototypes
+            - -Wno-missing-noreturn
+            - -Wno-sign-conversion
+            - -Wno-nonportable-include-path
+            - -Wno-reserved-id-macro
+            - -Wno-unused-macros
+            - -Wno-documentation-unknown-command
+            - -Wno-documentation
+            - -Wno-license-management
+            - -Wno-parentheses-equality
+          CPP:
+            - -xc++
+            - -std=c++11
+            - -fno-exceptions
+          ASM:
+            - -masm=auto
+          Link:
+            - --library_type=microlib
+            - --map
+            - --load_addr_map_info
+            - --xref
+            - --callgraph
+            - --symbols
+            - --info sizes
+            - --info totals
+            - --info unused
+            - --info veneers
+            - --strict
+            - --summary_stderr
+            - --info summarysizes
+  linker:
+    - script: ST7735_ST7735.sct
+  groups:
+    - group: Application/MDK-ARM
+      files:
+        - file: startup_stm32f103xb.s
+          misc:
+            - ASM:
+                - -masm=auto
+        - file: ../Src/UI.c
+        - file: ../Inc/UI.h
+        - file: ../Inc/UI_Solider.h
+        - file: ../Src/UI_Solider.c
+    - group: Application/User
+      files:
+        - file: ../ST7735_LCD_TFT/ST7735_SPI.c
+        - file: ../ST7735_LCD_TFT/fonts.c
+        - file: ../Src/main.c
+        - file: ../Src/usb_device.c
+          misc:
+            - CPP:
+                - -xc++
+        - file: ../Src/usbd_conf.c
+          misc:
+            - CPP:
+                - -xc++
+        - file: ../Src/usbd_desc.c
+          misc:
+            - CPP:
+                - -xc++
+        - file: ../Src/usbd_cdc_if.c
+          misc:
+            - CPP:
+                - -xc++
+        - file: ../Src/stm32f1xx_it.c
+        - file: ../Src/stm32f1xx_hal_msp.c
+    - group: Drivers/CMSIS
+      files:
+        - file: ../Src/system_stm32f1xx.c
+    - group: Drivers/STM32F1xx_HAL_Driver
+      misc:
+        - C-CPP:
+            - -Wno-packed
+            - -Wno-missing-variable-declarations
+            - -Wno-missing-prototypes
+            - -Wno-missing-noreturn
+            - -Wno-sign-conversion
+            - -Wno-nonportable-include-path
+            - -Wno-reserved-id-macro
+            - -Wno-unused-macros
+            - -Wno-documentation-unknown-command
+            - -Wno-documentation
+            - -Wno-license-management
+            - -Wno-parentheses-equality
+            - -Wno-covered-switch-default
+            - -Wno-unreachable-code-break
+          CPP:
+            - -xc++
+            - -fno-exceptions
+      files:
+        - file: ../Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_gpio_ex.c
+          misc:
+            - CPP:
+                - -xc++
+        - file: ../Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_pcd.c
+          misc:
+            - CPP:
+                - -xc++
+        - file: ../Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_pcd_ex.c
+          misc:
+            - CPP:
+                - -xc++
+        - file: ../Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_ll_usb.c
+          misc:
+            - CPP:
+                - -xc++
+        - file: ../Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal.c
+          misc:
+            - CPP:
+                - -xc++
+        - file: ../Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_rcc.c
+          misc:
+            - CPP:
+                - -xc++
+        - file: ../Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_rcc_ex.c
+          misc:
+            - CPP:
+                - -xc++
+        - file: ../Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_gpio.c
+          misc:
+            - CPP:
+                - -xc++
+        - file: ../Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_dma.c
+          misc:
+            - CPP:
+                - -xc++
+        - file: ../Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_cortex.c
+          misc:
+            - CPP:
+                - -xc++
+        - file: ../Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_pwr.c
+          misc:
+            - CPP:
+                - -xc++
+        - file: ../Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_flash.c
+          misc:
+            - CPP:
+                - -xc++
+        - file: ../Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_flash_ex.c
+          misc:
+            - CPP:
+                - -xc++
+        - file: ../Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_exti.c
+          misc:
+            - CPP:
+                - -xc++
+        - file: ../Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_adc.c
+          misc:
+            - CPP:
+                - -xc++
+        - file: ../Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_adc_ex.c
+          misc:
+            - CPP:
+                - -xc++
+        - file: ../Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_spi.c
+          misc:
+            - CPP:
+                - -xc++
+        - file: ../Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_tim.c
+          misc:
+            - CPP:
+                - -xc++
+        - file: ../Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_tim_ex.c
+          misc:
+            - CPP:
+                - -xc++
+    - group: Middlewares/USB_Device_Library
+      misc:
+        - C-CPP:
+            - -Wno-packed
+            - -Wno-missing-variable-declarations
+            - -Wno-missing-prototypes
+            - -Wno-missing-noreturn
+            - -Wno-sign-conversion
+            - -Wno-nonportable-include-path
+            - -Wno-reserved-id-macro
+            - -Wno-unused-macros
+            - -Wno-documentation-unknown-command
+            - -Wno-documentation
+            - -Wno-license-management
+            - -Wno-parentheses-equality
+            - -Wno-covered-switch-default
+            - -Wno-unreachable-code-break
+          CPP:
+            - -xc++
+            - -fno-exceptions
+      files:
+        - file: ../Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_core.c
+          misc:
+            - CPP:
+                - -xc++
+        - file: ../Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_ctlreq.c
+          misc:
+            - CPP:
+                - -xc++
+        - file: ../Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_ioreq.c
+          misc:
+            - CPP:
+                - -xc++
+        - file: ../Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Src/usbd_cdc.c
+          misc:
+            - CPP:
+                - -xc++
+  components:
+    - component: ARM::CMSIS:CORE

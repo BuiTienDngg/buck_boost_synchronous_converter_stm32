@@ -1,0 +1,19 @@
+build-idx:
+  generated-by: csolution version 2.14.1+p38-gf512b381
+  csolution: ST7735.csolution.yml
+  cbuild-run: out/ST7735+ST7735.cbuild-run.yml
+  tmpdir: tmp/ST7735/default
+  cprojects:
+    - cproject: ST7735.cproject.yml
+  cbuilds:
+    - cbuild: out/ST7735/ST7735/ST7735+ST7735.cbuild.yml
+      project: ST7735
+      configuration: +ST7735
+      messages:
+        info:
+          - ST7735.cbuild-pack.yml - file is already up-to-date
+          - ST7735+ST7735.cbuild-run.yml - file is already up-to-date
+          - ST7735+ST7735.cbuild.yml - file is already up-to-date
+      packs-unused:
+        - pack: ARM::CMSIS-DSP@1.17.1
+        - pack: ARM::CMSIS-NN@4.1.0

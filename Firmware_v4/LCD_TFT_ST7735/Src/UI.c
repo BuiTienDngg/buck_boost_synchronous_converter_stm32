@@ -8,7 +8,7 @@
 #define UI_FONT_BIG                Font_16x26
 #define UI_FONT_MEDIUM             Font_11x18
 
-#define UI_DIGIT_BLINK_MS					 400
+#define UI_DIGIT_BLINK_MS					 600
 #define UI_LCD_PERIOD_MS           60
 #define UI_ENC_STEP                4
 
@@ -22,7 +22,7 @@
 
 #define UI_FLASH_PAGE_ADDR         0x0800FC00U
 #define UI_FLASH_MAGIC             0xBABA2026U
-#define UI_FLASH_VERSION           2U
+#define UI_FLASH_VERSION           3U
 
 #define BTN_ACTIVE                 GPIO_PIN_RESET
 #define BTN_DEBOUNCE_MS            35
@@ -42,7 +42,7 @@
 #define BTN_ENC_PORT               GPIOB
 #define BTN_ENC_PIN                GPIO_PIN_4
 
-#define DISP_FILTER_MS             200
+#define DISP_FILTER_MS             150
 
 #define VOUT_DEADBAND              0.05f
 #define IOUT_DEADBAND              0.05f
@@ -50,7 +50,7 @@
 #define TEMP_DEADBAND              0.3f
 #define POWER_DEADBAND             0.3f
 
-#define DISP_ALPHA                 0.25f
+#define DISP_ALPHA                 0.70f
 
 #define SWITCH_PIN GPIO_PIN_15
 #define SWITCH_PORT GPIOB
@@ -63,6 +63,14 @@
 #define MAX_INPUT_POWER_MIN         20.0f
 #define MAX_INPUT_POWER_MAX         500.0f
 #define MAX_INPUT_POWER_STEP        5.0f
+
+/* Main-screen trend graph (portrait LCD: 128 x 160). */
+#define GRAPH_X                     1U
+#define GRAPH_Y                     15U
+#define GRAPH_W                     126U
+#define GRAPH_H                     89U
+#define GRAPH_SAMPLE_MS             10U
+#define GRAPH_POINTS                (GRAPH_W - 2U)
 typedef enum
 {
     UI_SCREEN_POWER = 0,
@@ -79,8 +87,14 @@ typedef enum
 {
     SETTINGS_ITEM_MAX_POWER = 0,
     SETTINGS_ITEM_START_MODE,
+    SETTINGS_ITEM_MAIN_STYLE,
     SETTINGS_ITEM_COUNT
 } UI_SettingsItem_t;
+typedef enum
+{
+    UI_MAIN_NUMERIC = 0,
+    UI_MAIN_GRAPH
+} UI_MainStyle_t;
 typedef struct
 {
     uint32_t magic;
@@ -91,9 +105,21 @@ typedef struct
 
     float max_input_power;
     uint32_t start_mode;
+    uint32_t main_style;
 
     uint32_t checksum;
 } UI_FlashData_t;
+
+typedef struct
+{
+    uint32_t magic;
+    uint32_t version;
+    float vset;
+    float iset;
+    float max_input_power;
+    uint32_t start_mode;
+    uint32_t checksum;
+} UI_FlashDataV2_t;
 
 typedef struct
 {
@@ -107,6 +133,7 @@ static BBUI_Data_t *ui = 0;
 static TIM_HandleTypeDef *enc_tim = 0;
 static UI_SettingsItem_t settings_item = SETTINGS_ITEM_MAX_POWER;
 static uint8_t settings_editing = 0;
+static UI_MainStyle_t main_style = UI_MAIN_GRAPH;
 
 static UI_Screen_t settings_return_screen = UI_SCREEN_POWER;
 static UI_Select_t ui_select = UI_SELECT_NONE;
@@ -152,19 +179,26 @@ static const char *i_step_text[] =
     "0.1",
     "1"
 };
-static char c_digit[16] = "";
+static char c_digit[32] = "";
 static char c_u[32] = "";
 static char c_i[32] = "";
 static char c_p[32] = "";
 static char c_vin[32] = "";
 static char c_iset[32] = "";
 static char c_temp[32] = "";
-static char c_out[16] = "";
-static char c_set_tag[16] = "";
-static char c_run_cv[16] = "";
-static char c_run_cc[16] = "";
-static char c_unit_p[16] = "";
-static char c_save[16] = "";
+static char c_out[32] = "";
+static char c_set_tag[32] = "";
+static char c_run_cv[32] = "";
+static char c_run_cc[32] = "";
+static char c_unit_p[32] = "";
+static char c_save[32] = "";
+
+static uint16_t graph_head = 0;
+static uint32_t graph_last_sample = 0;
+static int16_t graph_last_x = -1;
+static int16_t graph_last_yv = -1;
+static int16_t graph_last_yi = -1;
+static uint8_t graph_has_last = 0;
 
 static float disp_vout = 0.0f;
 static float disp_iout = 0.0f;
@@ -399,24 +433,47 @@ void BBUI_LoadFromFlash(void)
     if(fd->magic != UI_FLASH_MAGIC)
         return;
 
-    if(fd->version != UI_FLASH_VERSION)
-        return;
+    if(fd->version == 2U)
+    {
+        UI_FlashDataV2_t *old = (UI_FlashDataV2_t*)UI_FLASH_PAGE_ADDR;
+        uint32_t old_words = (sizeof(UI_FlashDataV2_t) - sizeof(uint32_t)) / 4U;
 
-    uint32_t words = (sizeof(UI_FlashData_t) - sizeof(uint32_t)) / 4;
-    uint32_t checksum = UI_Checksum32((uint32_t*)fd, words);
+        if(UI_Checksum32((uint32_t*)old, old_words) != old->checksum)
+            return;
 
-    if(checksum != fd->checksum)
-        return;
+        ui->vset = clampf(old->vset, VSET_MIN, VSET_MAX);
+        ui->iset = clampf(old->iset, ISET_MIN, ISET_MAX);
+        ui->max_input_power = clampf(old->max_input_power,
+                                     MAX_INPUT_POWER_MIN,
+                                     MAX_INPUT_POWER_MAX);
+        ui->start_mode = old->start_mode == BB_START_HARD
+                       ? BB_START_HARD : BB_START_SOFT;
+        main_style = UI_MAIN_GRAPH;
+    }
+    else
+    {
+        uint32_t words;
+        uint32_t checksum;
 
-    ui->vset = clampf(fd->vset, VSET_MIN, VSET_MAX);
-    ui->iset = clampf(fd->iset, ISET_MIN, ISET_MAX);
-		ui->max_input_power = clampf(fd->max_input_power,
-           MAX_INPUT_POWER_MIN,
-           MAX_INPUT_POWER_MAX);
+        if(fd->version != UI_FLASH_VERSION)
+            return;
 
-		ui->start_mode = fd->start_mode == BB_START_HARD
-				? BB_START_HARD
-				: BB_START_SOFT;
+        words = (sizeof(UI_FlashData_t) - sizeof(uint32_t)) / 4U;
+        checksum = UI_Checksum32((uint32_t*)fd, words);
+        if(checksum != fd->checksum)
+            return;
+
+        ui->vset = clampf(fd->vset, VSET_MIN, VSET_MAX);
+        ui->iset = clampf(fd->iset, ISET_MIN, ISET_MAX);
+        ui->max_input_power = clampf(fd->max_input_power,
+                                     MAX_INPUT_POWER_MIN,
+                                     MAX_INPUT_POWER_MAX);
+        ui->start_mode = fd->start_mode == BB_START_HARD
+                       ? BB_START_HARD : BB_START_SOFT;
+        main_style = fd->main_style == UI_MAIN_NUMERIC
+                   ? UI_MAIN_NUMERIC : UI_MAIN_GRAPH;
+    }
+
     ui->enable = 0;
     ui->state = BBUI_STATE_OFF;
 
@@ -437,6 +494,7 @@ void BBUI_SaveToFlash(void)
     fd.iset = ui->iset;
 		fd.max_input_power = ui->max_input_power;
 		fd.start_mode = ui->start_mode;
+    fd.main_style = main_style;
     uint32_t words = (sizeof(UI_FlashData_t) - sizeof(uint32_t)) / 4;
     fd.checksum = UI_Checksum32((uint32_t*)&fd, words);
 
@@ -478,30 +536,60 @@ static void SetDefaultConfig(void)
     ui->state = BBUI_STATE_OFF;
 }
 
-static void DrawMainBase(void)
+static void DrawMainGraphBase(void)
 {
     ST7735_FillScreen(ST7735_BLACK);
 
+    ST7735_WriteString(0, 2, "U:", UI_FONT_SMALL, ST7735_GREEN, ST7735_BLACK);
+    ST7735_WriteString(66, 2, "I:", UI_FONT_SMALL, ST7735_YELLOW, ST7735_BLACK);
+
+    drawRect(GRAPH_X, GRAPH_Y, GRAPH_W, GRAPH_H, ST7735_BLUE);
+
+    drawHline(GRAPH_X + 1U,
+              GRAPH_Y + (GRAPH_H - 1U) / 4U,
+              GRAPH_W - 2U, ST7735_COLOR565(16, 28, 38));
+    drawHline(GRAPH_X + 1U,
+              GRAPH_Y + (GRAPH_H - 1U) / 2U,
+              GRAPH_W - 2U, ST7735_COLOR565(16, 28, 38));
+    drawHline(GRAPH_X + 1U,
+              GRAPH_Y + 3U * (GRAPH_H - 1U) / 4U,
+              GRAPH_W - 2U, ST7735_COLOR565(16, 28, 38));
+
+    graph_head = 0;
+    graph_last_sample = 0;
+    graph_last_x = -1;
+    graph_last_yv = -1;
+    graph_last_yi = -1;
+    graph_has_last = 0;
+
+    ClearCache();
+}
+
+static void DrawMainNumericBase(void)
+{
+    ST7735_FillScreen(ST7735_BLACK);
     ST7735_WriteString(110, 13, "U", UI_FONT_SMALL, ST7735_GREEN, ST7735_BLACK);
     ST7735_WriteString(110, 43, "I", UI_FONT_SMALL, ST7735_YELLOW, ST7735_BLACK);
     ST7735_WriteString(110, 73, "P", UI_FONT_SMALL, ST7735_MAGENTA, ST7735_BLACK);
-
     ST7735_WriteString(0, 60, "SET", UI_FONT_SMALL, ST7735_MAGENTA, ST7735_BLACK);
-
     ST7735_WriteString(0, 98, "Vin:", UI_FONT_SMALL, ST7735_CYAN, ST7735_BLACK);
     ST7735_WriteString(85, 98, "V", UI_FONT_SMALL, ST7735_CYAN, ST7735_BLACK);
-
     ST7735_WriteString(0, 118, "Ilim:", UI_FONT_SMALL, ST7735_CYAN, ST7735_BLACK);
     ST7735_WriteString(92, 118, "A", UI_FONT_SMALL, ST7735_CYAN, ST7735_BLACK);
-
     ST7735_WriteString(0, 138, "Temp:", UI_FONT_SMALL, ST7735_RED, ST7735_BLACK);
     ST7735_WriteString(85, 138, "*C", UI_FONT_SMALL, ST7735_RED, ST7735_BLACK);
-
     drawHline(25, 25, 78, ST7735_BLUE);
     drawHline(25, 55, 78, ST7735_BLUE);
     drawHline(25, 85, 78, ST7735_BLUE);
-
     ClearCache();
+}
+
+static void DrawMainBase(void)
+{
+    if(main_style == UI_MAIN_NUMERIC)
+        DrawMainNumericBase();
+    else
+        DrawMainGraphBase();
 }
 static void DrawSolderBase(void)
 {
@@ -742,7 +830,106 @@ static void ApplyBlinkDigit(char *buf, uint8_t digit_index)
 
     buf[digit_index] = ' ';
 }
-static void UpdateMain(uint8_t force)
+
+static uint8_t GraphScale(float value, float maximum)
+{
+    value = clampf(value, 0.0f, maximum);
+    return (uint8_t)(value * (float)(GRAPH_H - 3U) / maximum + 0.5f);
+}
+
+static void GraphLine(int16_t x0, int16_t y0,
+                      int16_t x1, int16_t y1,
+                      uint16_t color)
+{
+    int16_t dx = x1 > x0 ? x1 - x0 : x0 - x1;
+    int16_t sx = x0 < x1 ? 1 : -1;
+    int16_t dy_abs = y1 > y0 ? y1 - y0 : y0 - y1;
+    int16_t dy = -dy_abs;
+    int16_t sy = y0 < y1 ? 1 : -1;
+    int16_t err = dx + dy;
+
+    while(1)
+    {
+        ST7735_DrawPixel((uint16_t)x0, (uint16_t)y0, color);
+        if(x0 == x1 && y0 == y1)
+            break;
+
+        int16_t e2 = (int16_t)(2 * err);
+        if(e2 >= dy)
+        {
+            err += dy;
+            x0 += sx;
+        }
+        if(e2 <= dx)
+        {
+            err += dx;
+            y0 += sy;
+        }
+    }
+}
+
+static void UpdateGraph(uint8_t force)
+{
+    uint32_t now = HAL_GetTick();
+    uint16_t grid = ST7735_COLOR565(16, 28, 38);
+    int16_t x;
+    int16_t yv;
+    int16_t yi;
+
+    if(!force && (uint32_t)(now - graph_last_sample) < GRAPH_SAMPLE_MS)
+        return;
+
+    graph_last_sample = now;
+    x = (int16_t)(GRAPH_X + 1U + graph_head);
+    yv = (int16_t)(GRAPH_Y + GRAPH_H - 2U -
+                   GraphScale(disp_vout, VSET_MAX));
+    yi = (int16_t)(GRAPH_Y + GRAPH_H - 2U -
+                   GraphScale(disp_iout, ISET_MAX));
+
+    /* Clear only the write cursor and one look-ahead column. */
+    for(uint8_t column = 0; column < 2U; column++)
+    {
+        int16_t clear_x = (int16_t)(x + column);
+
+        if(clear_x <= (int16_t)(GRAPH_X + GRAPH_W - 2U))
+        {
+            ST7735_FillRectangle((uint16_t)clear_x, GRAPH_Y + 1U,
+                                 1U, GRAPH_H - 2U, ST7735_BLACK);
+
+            ST7735_DrawPixel((uint16_t)clear_x,
+                             GRAPH_Y + (GRAPH_H - 1U) / 4U, grid);
+            ST7735_DrawPixel((uint16_t)clear_x,
+                             GRAPH_Y + (GRAPH_H - 1U) / 2U, grid);
+            ST7735_DrawPixel((uint16_t)clear_x,
+                             GRAPH_Y + 3U * (GRAPH_H - 1U) / 4U, grid);
+        }
+    }
+
+    if(graph_has_last && x > graph_last_x)
+    {
+        GraphLine(graph_last_x, graph_last_yv, x, yv, ST7735_GREEN);
+        GraphLine(graph_last_x, graph_last_yi, x, yi, ST7735_YELLOW);
+    }
+    else
+    {
+        ST7735_DrawPixel((uint16_t)x, (uint16_t)yv, ST7735_GREEN);
+        ST7735_DrawPixel((uint16_t)x, (uint16_t)yi, ST7735_YELLOW);
+    }
+
+    graph_last_x = x;
+    graph_last_yv = yv;
+    graph_last_yi = yi;
+    graph_has_last = 1;
+
+    graph_head++;
+    if(graph_head >= GRAPH_POINTS)
+    {
+        graph_head = 0;
+        graph_has_last = 0;
+    }
+}
+
+static void UpdateMainGraph(uint8_t force)
 {
     char buf[32];
 
@@ -753,160 +940,143 @@ static void UpdateMain(uint8_t force)
 
     FmtNumber(buf, disp_vout, 2);
     WriteCached(c_u,
-                25, 0, 78,
+                14, 2, 48,
                 buf,
-                UI_FONT_BIG,
+                UI_FONT_SMALL,
                 ST7735_GREEN,
                 ST7735_BLACK,
                 force);
 
     FmtNumber(buf, disp_iout, 2);
     WriteCached(c_i,
-                25, 30, 78,
+                80, 2, 48,
                 buf,
-                UI_FONT_BIG,
+                UI_FONT_SMALL,
                 ST7735_YELLOW,
                 ST7735_BLACK,
                 force);
 
-		if(ui_select == UI_SELECT_VSET)
-		{
-				FmtNumber(buf, ui->vset, 2);
-				ApplyBlinkDigit(buf, GetVDigitIndex());
+    UpdateGraph(force);
 
-				WriteCached(c_p,
-										25, 60, 78,
-										buf,
-										UI_FONT_BIG,
-										ST7735_MAGENTA,
-										ST7735_BLACK,
-										force);
-
-				WriteCached(c_unit_p,
-										110, 73, 12,
-										"V",
-										UI_FONT_SMALL,
-										ST7735_MAGENTA,
-										ST7735_BLACK,
-										force);
-		}
-		else if(ui_select == UI_SELECT_ISET)
-		{
-				FmtNumber(buf, ui->iset, 2);
-				ApplyBlinkDigit(buf, GetIDigitIndex());
-
-				WriteCached(c_p,
-										25, 60, 78,
-										buf,
-										UI_FONT_BIG,
-										ST7735_MAGENTA,
-										ST7735_BLACK,
-										force);
-
-				WriteCached(c_unit_p,
-										110, 73, 12,
-										"I",
-										UI_FONT_SMALL,
-										ST7735_MAGENTA,
-										ST7735_BLACK,
-										force);
-		}
-    else
+    FmtNumber(buf, disp_power, disp_power < 100.0f ? 1 : 0);
     {
-        if(disp_power < 100.0f)
-            FmtNumber(buf, disp_power, 2);
+        char line[32];
+        char vin[16];
+        FmtNumber(vin, disp_vin, 1);
+        sprintf(line, "P:%sW Vin:%sV", buf, vin);
+        WriteCached(c_p, 0, 106, 128, line, UI_FONT_SMALL,
+                    ST7735_CYAN, ST7735_BLACK, force);
+    }
+
+    {
+        char line[32];
+        char vset[16];
+        char iset[16];
+        FmtNumber(vset, ui->vset, 2);
+        FmtNumber(iset, ui->iset, 2);
+        if(ui_select == UI_SELECT_VSET)
+            ApplyBlinkDigit(vset, GetVDigitIndex());
+        if(ui_select == UI_SELECT_ISET)
+            ApplyBlinkDigit(iset, GetIDigitIndex());
+        sprintf(line, "Set:%sV %sA", vset, iset);
+        WriteCached(c_iset, 0, 118, 128, line, UI_FONT_SMALL,
+                    ST7735_MAGENTA, ST7735_BLACK, force);
+    }
+
+    {
+        char line[32];
+        char temp[16];
+        FmtNumber(temp, disp_temp, 1);
+        sprintf(line, "T:%sC OUT:%s", temp, ui->enable ? "ON" : "OFF");
+        WriteCached(c_temp, 0, 130, 128, line, UI_FONT_SMALL,
+                    ui->enable ? ST7735_GREEN : ST7735_RED,
+                    ST7735_BLACK, force);
+    }
+
+    {
+        char line[32];
+        const char *mode = ui->state == BBUI_STATE_CV ? "CV" :
+                           ui->state == BBUI_STATE_CC ? "CC" :
+                           ui->state == BBUI_STATE_FAULT ? "FAULT" : "OFF";
+        if(save_msg_until > HAL_GetTick())
+            sprintf(line, "%s  SAVED", mode);
+        else if(ui_select == UI_SELECT_VSET)
+            sprintf(line, "%s  EDIT V %s", mode, v_step_text[v_digit]);
+        else if(ui_select == UI_SELECT_ISET)
+            sprintf(line, "%s  EDIT I %s", mode, i_step_text[i_digit]);
         else
-            FmtNumber(buf, disp_power, 1);
-
-        WriteCached(c_p,
-                    25, 60, 78,
-                    buf,
-                    UI_FONT_BIG,
-                    ST7735_MAGENTA,
-                    ST7735_BLACK,
-                    force);
-
-        WriteCached(c_unit_p,
-                    110, 73, 12,
-                    "P",
-                    UI_FONT_SMALL,
-                    ST7735_MAGENTA,
-                    ST7735_BLACK,
-                    force);
+            sprintf(line, "%s", mode);
+        WriteCached(c_run_cv, 0, 144, 128, line, UI_FONT_SMALL,
+                    ST7735_WHITE, ST7735_BLACK, force);
     }
+}
+static void UpdateMainNumeric(uint8_t force)
+{
+    char buf[32];
 
-    if(ui->enable)
+    if(ui == 0)
+        return;
+
+    DisplayFilterTask();
+
+    FmtNumber(buf, disp_vout, 2);
+    WriteCached(c_u, 25, 0, 78, buf, UI_FONT_BIG,
+                ST7735_GREEN, ST7735_BLACK, force);
+    FmtNumber(buf, disp_iout, 2);
+    WriteCached(c_i, 25, 30, 78, buf, UI_FONT_BIG,
+                ST7735_YELLOW, ST7735_BLACK, force);
+
+    if(ui_select == UI_SELECT_VSET)
     {
-        WriteCached(c_out,
-                    0, 40, 24,
-                    "ON ",
-                    UI_FONT_SMALL,
-                    ST7735_GREEN,
-                    ST7735_BLACK,
-                    force);
+        FmtNumber(buf, ui->vset, 2);
+        ApplyBlinkDigit(buf, GetVDigitIndex());
+        WriteCached(c_unit_p, 110, 73, 12, "V", UI_FONT_SMALL,
+                    ST7735_MAGENTA, ST7735_BLACK, force);
+    }
+    else if(ui_select == UI_SELECT_ISET)
+    {
+        FmtNumber(buf, ui->iset, 2);
+        ApplyBlinkDigit(buf, GetIDigitIndex());
+        WriteCached(c_unit_p, 110, 73, 12, "I", UI_FONT_SMALL,
+                    ST7735_MAGENTA, ST7735_BLACK, force);
     }
     else
     {
-        WriteCached(c_out,
-                    0, 40, 24,
-                    "OFF",
-                    UI_FONT_SMALL,
-                    ST7735_RED,
-                    ST7735_BLACK,
-                    force);
+        FmtNumber(buf, disp_power, disp_power < 100.0f ? 2 : 1);
+        WriteCached(c_unit_p, 110, 73, 12, "P", UI_FONT_SMALL,
+                    ST7735_MAGENTA, ST7735_BLACK, force);
     }
+    WriteCached(c_p, 25, 60, 78, buf, UI_FONT_BIG,
+                ST7735_MAGENTA, ST7735_BLACK, force);
 
+    WriteCached(c_out, 0, 40, 24, ui->enable ? "ON " : "OFF",
+                UI_FONT_SMALL, ui->enable ? ST7735_GREEN : ST7735_RED,
+                ST7735_BLACK, force);
     UpdateSelectTag(force);
     UpdateRunModeTag(force);
 
     FmtNumber(buf, disp_vin, 2);
-    WriteCached(c_vin,
-                28, 91, 54,
-                buf,
-                UI_FONT_MEDIUM,
-                ST7735_GREEN,
-                ST7735_BLACK,
-                force);
-
+    WriteCached(c_vin, 28, 91, 54, buf, UI_FONT_MEDIUM,
+                ST7735_GREEN, ST7735_BLACK, force);
     FmtNumber(buf, ui->iset, 2);
-    WriteCached(c_iset,
-                37, 111, 52,
-                buf,
-                UI_FONT_MEDIUM,
-                ST7735_YELLOW,
-                ST7735_BLACK,
-                force);
-
+    WriteCached(c_iset, 37, 111, 52, buf, UI_FONT_MEDIUM,
+                ST7735_YELLOW, ST7735_BLACK, force);
     FmtNumber(buf, disp_temp, 1);
-    WriteCached(c_temp,
-                37, 131, 46,
-                buf,
-                UI_FONT_MEDIUM,
-                ST7735_RED,
-                ST7735_BLACK,
-                force);
-
-    if(save_msg_until > HAL_GetTick())
-    {
-        WriteCached(c_save,
-                    118, 138, 40,
-                    "SAVE",
-                    UI_FONT_SMALL,
-                    ST7735_GREEN,
-                    ST7735_BLACK,
-                    force);
-    }
-    else
-    {
-        WriteCached(c_save,
-                    118, 138, 40,
-                    "    ",
-                    UI_FONT_SMALL,
-                    ST7735_BLACK,
-                    ST7735_BLACK,
-                    force);
-    }
+    WriteCached(c_temp, 37, 131, 46, buf, UI_FONT_MEDIUM,
+                ST7735_RED, ST7735_BLACK, force);
+    WriteCached(c_save, 98, 148, 30,
+                save_msg_until > HAL_GetTick() ? "SAVE" : "    ",
+                UI_FONT_SMALL, ST7735_GREEN, ST7735_BLACK, force);
 }
+
+static void UpdateMain(uint8_t force)
+{
+    if(main_style == UI_MAIN_NUMERIC)
+        UpdateMainNumeric(force);
+    else
+        UpdateMainGraph(force);
+}
+
 static void DrawSettingsBase(void)
 {
     ST7735_FillScreen(ST7735_BLACK);
@@ -921,24 +1091,29 @@ static void DrawSettingsBase(void)
     drawHline(0, 25, 127, ST7735_BLUE);
 
     ST7735_WriteString(12,
-                       40,
+                       31,
                        "MAX INPUT POWER",
                        UI_FONT_SMALL,
                        ST7735_WHITE,
                        ST7735_BLACK);
 
     ST7735_WriteString(12,
-                       87,
+                       72,
                        "START MODE",
                        UI_FONT_SMALL,
                        ST7735_WHITE,
                        ST7735_BLACK);
 
-    drawHline(0, 132, 127, ST7735_BLUE);
+    ST7735_WriteString(12,
+                       108,
+                       "MAIN DISPLAY",
+                       UI_FONT_SMALL,
+                       ST7735_WHITE,
+                       ST7735_BLACK);
 
-    ST7735_WriteString(5,
-                       143,
-                       "HOLD:EXIT PRESS:EDIT",
+    ST7735_WriteString(0,
+                       149,
+                       "HOLD:EXIT PUSH:SET",
                        UI_FONT_SMALL,
                        ST7735_BLUE,
                        ST7735_BLACK);
@@ -957,36 +1132,44 @@ static void UpdateSettings(uint8_t force)
         ? ST7735_RED
         : ST7735_WHITE;
 
+    uint16_t style_color =
+        settings_item == SETTINGS_ITEM_MAIN_STYLE
+        ? ST7735_RED
+        : ST7735_WHITE;
+
     /*
      * X?a v? v? con tr?.
      */
-    ST7735_FillRectangle(0, 35, 10, 80, ST7735_BLACK);
+    ST7735_FillRectangle(0, 28, 10, 118, ST7735_BLACK);
 
     if(settings_item == SETTINGS_ITEM_MAX_POWER)
-        ST7735_WriteString(2, 55, ">", UI_FONT_SMALL,
+        ST7735_WriteString(2, 47, ">", UI_FONT_SMALL,
+                           ST7735_RED, ST7735_BLACK);
+    else if(settings_item == SETTINGS_ITEM_START_MODE)
+        ST7735_WriteString(2, 86, ">", UI_FONT_SMALL,
                            ST7735_RED, ST7735_BLACK);
     else
-        ST7735_WriteString(2, 102, ">", UI_FONT_SMALL,
+        ST7735_WriteString(2, 123, ">", UI_FONT_SMALL,
                            ST7735_RED, ST7735_BLACK);
 
     sprintf(buf, "%03ld W",
             (long)(ui->max_input_power + 0.5f));
 
-    ST7735_FillRectangle(28, 54, 80, 20, ST7735_BLACK);
+    ST7735_FillRectangle(28, 43, 80, 20, ST7735_BLACK);
 
     ST7735_WriteString(28,
-                       54,
+                       43,
                        buf,
                        UI_FONT_MEDIUM,
                        power_color,
                        ST7735_BLACK);
 
-    ST7735_FillRectangle(35, 100, 65, 20, ST7735_BLACK);
+    ST7735_FillRectangle(35, 82, 65, 20, ST7735_BLACK);
 
     if(ui->start_mode == BB_START_SOFT)
     {
         ST7735_WriteString(35,
-                           100,
+                           82,
                            "SOFT",
                            UI_FONT_MEDIUM,
                            start_color,
@@ -995,12 +1178,17 @@ static void UpdateSettings(uint8_t force)
     else
     {
         ST7735_WriteString(35,
-                           100,
+                           82,
                            "HARD",
                            UI_FONT_MEDIUM,
                            start_color,
                            ST7735_BLACK);
     }
+
+    ST7735_FillRectangle(25, 119, 88, 20, ST7735_BLACK);
+    ST7735_WriteString(25, 119,
+                       main_style == UI_MAIN_GRAPH ? "GRAPH" : "NUMERIC",
+                       UI_FONT_MEDIUM, style_color, ST7735_BLACK);
 
     /*
      * Khi dang ch?nh, th?m d?u ngo?c.
@@ -1009,27 +1197,34 @@ static void UpdateSettings(uint8_t force)
     {
         if(settings_item == SETTINGS_ITEM_MAX_POWER)
         {
-            ST7735_WriteString(18, 54, "[",
+            ST7735_WriteString(18, 43, "[",
                                UI_FONT_MEDIUM,
                                ST7735_YELLOW,
                                ST7735_BLACK);
 
-            ST7735_WriteString(105, 54, "]",
+            ST7735_WriteString(105, 43, "]",
+                               UI_FONT_MEDIUM,
+                               ST7735_YELLOW,
+                               ST7735_BLACK);
+        }
+        else if(settings_item == SETTINGS_ITEM_START_MODE)
+        {
+            ST7735_WriteString(25, 82, "[",
+                               UI_FONT_MEDIUM,
+                               ST7735_YELLOW,
+                               ST7735_BLACK);
+
+            ST7735_WriteString(85, 82, "]",
                                UI_FONT_MEDIUM,
                                ST7735_YELLOW,
                                ST7735_BLACK);
         }
         else
         {
-            ST7735_WriteString(25, 100, "[",
-                               UI_FONT_MEDIUM,
-                               ST7735_YELLOW,
-                               ST7735_BLACK);
-
-            ST7735_WriteString(85, 100, "]",
-                               UI_FONT_MEDIUM,
-                               ST7735_YELLOW,
-                               ST7735_BLACK);
+            ST7735_WriteString(15, 119, "[", UI_FONT_MEDIUM,
+                               ST7735_YELLOW, ST7735_BLACK);
+            ST7735_WriteString(113, 119, "]", UI_FONT_MEDIUM,
+                               ST7735_YELLOW, ST7735_BLACK);
         }
     }
 }
@@ -1323,6 +1518,11 @@ static void EncoderAdjust(int8_t dir)
                         ? BB_START_HARD
                         : BB_START_SOFT;
                 }
+            }
+            else if(settings_item == SETTINGS_ITEM_MAIN_STYLE)
+            {
+                main_style = main_style == UI_MAIN_GRAPH
+                           ? UI_MAIN_NUMERIC : UI_MAIN_GRAPH;
             }
         }
 

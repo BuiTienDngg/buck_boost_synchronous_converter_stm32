@@ -140,12 +140,12 @@ static void MX_TIM4_Init(void);
 #define POWER_START_BLANK_MS        200U
 
 /* Input-voltage droop limiter. Vin may be 12 V, 15 V, 20 V, etc. */
-#define VIN_FILTER_ALPHA            0.03f
-#define VIN_REF_UPDATE_ALPHA        0.01f
+#define VIN_FILTER_ALPHA            0.20f
+#define VIN_REF_UPDATE_ALPHA        0.05f
 #define VIN_DROOP_ENTER_RATIO       0.90f
 #define VIN_DROOP_EXIT_RATIO        0.93f
-#define VIN_LIMIT_DOWN_RATE_AS      15.0f
-#define VIN_LIMIT_UP_RATE_AS        1.0f
+#define VIN_LIMIT_DOWN_RATE_AS      100.0f
+#define VIN_LIMIT_UP_RATE_AS        5.0f
 #define VIN_LIMIT_MIN_CURRENT       0.20f
 #define VIN_REF_LIGHT_CURRENT       0.30f
 
@@ -663,6 +663,31 @@ void PowerStage_CloseLoop_CVCC_1kHz(void)
 
     power_prev_enable = PowerStage.enable;
 
+    /* Fast droop immediate check: use raw DMA ADC sample (no averaging)
+       to detect large input sag from inrush and trip immediately. */
+    {
+      uint16_t vin_raw_fast = adc1_dma_buf[3];
+      float vin_fast = Read_Vin(vin_raw_fast);
+      if(vin_reference > VIN_MIN_PROTECT)
+      {
+        float vin_fast_enter = vin_reference * 0.88f;
+        if(vin_fast <= vin_fast_enter)
+        {
+          /* Immediate fault: stop PWM and disable output */
+          PowerStage_CVCC_Reset();
+
+          PowerStage.enable = 0U;
+          PowerStage.state = BBUI_STATE_FAULT;
+
+          PowerStage_Stop();
+
+          power_prev_enable = 0U;
+
+          return;
+        }
+      }
+    }
+
     /*
      * =====================================================
      * OUTPUT OFF
@@ -927,10 +952,10 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     float vin_new = Read_Vin(adc_avg[3]);
     float vout_new = Read_Vout(adc_avg[0]);
     float current_new = Read_Current(adc_avg[1]);
-
-    PowerStage.vin += 0.5f * (vin_new - PowerStage.vin);
-    PowerStage.vout += 0.5f * (vout_new - PowerStage.vout);
-    PowerStage.current += 0.5f * (current_new - PowerStage.current);
+   
+    PowerStage.vin += 0.8f * (vin_new - PowerStage.vin);
+    PowerStage.vout += 0.8f * (vout_new - PowerStage.vout);
+    PowerStage.current += 0.8f * (current_new - PowerStage.current);
 
     /* Learn the actual source voltage while output is off. */
     PowerStage_UpdateIdleVinReference();
@@ -940,7 +965,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 }
 
 volatile uint16_t solider_temp = 0;
-#define ADC_AVG_SAMPLES 36
+#define ADC_AVG_SAMPLES 4
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
     if(hadc->Instance == ADC1)
@@ -1028,6 +1053,10 @@ int main(void)
 	HAL_GPIO_WritePin(GPIOB,
                   GPIO_PIN_15,
                   GPIO_PIN_SET);
+	HAL_GPIO_WritePin(GPIOC,
+									GPIO_PIN_14,
+									GPIO_PIN_RESET); // BUZZER
+	HAL_GPIO_WritePin(GPIOC, GPIO_PIN_15, GPIO_PIN_SET);
   /* USER CODE END 2 */
 
   /* Infinite loop */

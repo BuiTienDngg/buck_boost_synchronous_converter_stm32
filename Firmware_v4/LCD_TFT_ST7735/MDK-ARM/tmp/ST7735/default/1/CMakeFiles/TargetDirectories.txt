@@ -1,0 +1,9 @@
+D:/My_project/buck_boost_converter/Firmware_v4/LCD_TFT_ST7735/MDK-ARM/tmp/ST7735/default/1/CMakeFiles/database.dir
+D:/My_project/buck_boost_converter/Firmware_v4/LCD_TFT_ST7735/MDK-ARM/tmp/ST7735/default/1/CMakeFiles/ST7735+ST7735.dir
+D:/My_project/buck_boost_converter/Firmware_v4/LCD_TFT_ST7735/MDK-ARM/tmp/ST7735/default/1/CMakeFiles/Group_Application_MDK-ARM.dir
+D:/My_project/buck_boost_converter/Firmware_v4/LCD_TFT_ST7735/MDK-ARM/tmp/ST7735/default/1/CMakeFiles/Group_Application_User.dir
+D:/My_project/buck_boost_converter/Firmware_v4/LCD_TFT_ST7735/MDK-ARM/tmp/ST7735/default/1/CMakeFiles/Group_Drivers_CMSIS.dir
+D:/My_project/buck_boost_converter/Firmware_v4/LCD_TFT_ST7735/MDK-ARM/tmp/ST7735/default/1/CMakeFiles/Group_Drivers_STM32F1xx_HAL_Driver.dir
+D:/My_project/buck_boost_converter/Firmware_v4/LCD_TFT_ST7735/MDK-ARM/tmp/ST7735/default/1/CMakeFiles/Group_Middlewares_USB_Device_Library.dir
+D:/My_project/buck_boost_converter/Firmware_v4/LCD_TFT_ST7735/MDK-ARM/tmp/ST7735/default/1/CMakeFiles/edit_cache.dir
+D:/My_project/buck_boost_converter/Firmware_v4/LCD_TFT_ST7735/MDK-ARM/tmp/ST7735/default/1/CMakeFiles/rebuild_cache.dir

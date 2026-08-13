@@ -69,7 +69,7 @@
 #define GRAPH_Y                     15U
 #define GRAPH_W                     126U
 #define GRAPH_H                     89U
-#define GRAPH_SAMPLE_MS             10U
+#define GRAPH_SAMPLE_MS             1U
 #define GRAPH_POINTS                (GRAPH_W - 2U)
 typedef enum
 {

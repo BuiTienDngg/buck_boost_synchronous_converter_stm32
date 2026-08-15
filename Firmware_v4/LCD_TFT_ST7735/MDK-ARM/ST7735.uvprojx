@@ -416,16 +416,6 @@
           <GroupName>Application/User</GroupName>
           <Files>
             <File>
-              <FileName>ST7735_SPI.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\ST7735_LCD_TFT\ST7735_SPI.c</FilePath>
-            </File>
-            <File>
-              <FileName>fonts.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\ST7735_LCD_TFT\fonts.c</FilePath>
-            </File>
-            <File>
               <FileName>main.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Src/main.c</FilePath>

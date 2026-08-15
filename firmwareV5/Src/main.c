@@ -431,11 +431,11 @@ static void PowerStage_SetRatio(float ratio)
     if(ratio > POWERSTAGE_DUTY_MAX)
         ratio = POWERSTAGE_DUTY_MAX;
 
-    uint32_t ccr = (uint32_t)(ratio * (float)(999));
+    uint32_t ccr = (uint32_t)(ratio * (float)(1000));
 		duty_buck = ccr;
-		duty_boost = 999 - ccr;
+		duty_boost = 1000 - ccr;
 		TIM1 -> CCR1 = duty_buck;
-		TIM1 -> CCR2 = duty_boost;
+		TIM1 -> CCR2 = 10;
     
 }
 float duty = 0;
@@ -464,7 +464,7 @@ static void PowerStage_Control_OpenLoop(void)
 		
     duty = PowerStage.vset / PowerStage.vin;
     
-    PowerStage_SetRatio(0.1f);
+    PowerStage_SetRatio(0.7f);
 }
 static void PowerStage_Control_CloseLoop(void)
 {
@@ -871,7 +871,7 @@ void Buck_UI_Init(void)
     BBUI_Init(&PowerStage, &htim4, &htim2);
 		
     HAL_TIM_Base_Start_IT(&htim3);
-		while(!adc_calib_offset);
+		//while(!adc_calib_offset);
 }
 uint32_t lastTime_readTemp = 0;
 void handle_temp(){
@@ -988,8 +988,9 @@ int main(void)
      *  - TIM3 1 kHz control interrupt
      *  - ST7789 init is performed by BBUI_Init()
      */
+		 HAL_Delay(1000);
     Buck_UI_Init();
-
+		PowerStage_Start();
     /* Normal buck-boost path selected at boot. */
     HAL_GPIO_WritePin(GPIOB, GPIO_PIN_15, GPIO_PIN_RESET);
 
@@ -1016,7 +1017,7 @@ int main(void)
      */
 		test_tim2 = (int16_t)__HAL_TIM_GET_COUNTER(&htim2);
     test_tim4 = (int16_t)__HAL_TIM_GET_COUNTER(&htim4);
-    BBUI_Task();
+    //BBUI_Task();
 
     /* Slow NTC / fan handling */
     handle_temp();
@@ -1277,7 +1278,7 @@ static void MX_TIM1_Init(void)
     Error_Handler();
   }
   sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = 0;
+  sConfigOC.Pulse = 5;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;

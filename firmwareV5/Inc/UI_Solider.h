@@ -1,0 +1,48 @@
+#ifndef UI_SOLIDER_H
+#define UI_SOLIDER_H
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#include "main.h"
+#include <stdint.h>
+
+typedef struct
+{
+    float tip_temp;
+    float current;
+    float fet_temp;
+    float power;
+
+    float set_temp;
+    float preset[3];
+
+    uint8_t active_preset;
+} UI_Solider_Data_t;
+
+void UI_Solider_Init(void);
+void UI_Solider_Enter(void);
+void UI_Solider_Exit(void);
+uint8_t UI_Solider_IsActive(void);
+
+void UI_Solider_SetData(float tip_temp,
+                        float current,
+                        float fet_temp,
+                        float power);
+
+float UI_Solider_GetSetTemp(void);
+
+void UI_Solider_SetPreset(uint8_t id, float temp);
+void UI_Solider_SelectPreset(uint8_t id);
+
+/* dir = +1 / -1, each step = 5 degC */
+void UI_Solider_EncoderAdjust(int8_t dir);
+
+void UI_Solider_Task(uint8_t force);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

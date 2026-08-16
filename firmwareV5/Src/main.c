@@ -352,20 +352,28 @@ uint16_t raw = 0;
 static float Read_NTC_Temp(void)
 {
     raw = ADC_Read_Channel(&hadc2, ADC_CHANNEL_2);
+    const float RFIX = 50000.0f;
 
-    float v = raw * 3.3f / 4095.0f;
+    const float R0   = 50000.0f;   // 50k @ 25°C
+    const float T0   = 298.15f;    // 25°C Kelvin
+    const float BETA = 3950.0f;    // ph?i dúng v?i NTC c?a b?n
 
-    if(v < 0.01f) v = 0.01f;
-    if(v > 3.29f) v = 3.29f;
+    float v = ((float)raw / 4095.0f) * VREF;
 
-    float r_ntc = 10000.0f * v / (3.3f - v);
+    if(v <= 0.01f || v >= (VREF - 0.01f))
+        return -100.0f;
 
-    float temp_k = 1.0f / 
-    (
-        (1.0f / 298.15f) + 
-        (logf(r_ntc / 10000.0f) / 3950.0f)
-    );
-    return temp_k - 273.15f;
+    float r_ntc = RFIX * v / (VREF - v);
+
+    float temp_k =
+        1.0f /
+        (
+            (1.0f / T0) +
+            (1.0f / BETA) *
+            logf(r_ntc / R0)
+        );
+
+    return temp_k - 273.15f + 30.0f;
 }
 #define CURRENT_GAIN        200.0f // 1.884
 #define SHUNT_R             0.002f
@@ -435,7 +443,7 @@ static void PowerStage_SetRatio(float ratio)
 		duty_buck = ccr;
 		duty_boost = 1000 - ccr;
 		TIM1 -> CCR1 = duty_buck;
-		TIM1 -> CCR2 = 10;
+		TIM1 -> CCR2 = duty_boost;
     
 }
 float duty = 0;
@@ -464,7 +472,7 @@ static void PowerStage_Control_OpenLoop(void)
 		
     duty = PowerStage.vset / PowerStage.vin;
     
-    PowerStage_SetRatio(0.7f);
+    PowerStage_SetRatio(0.6f);
 }
 static void PowerStage_Control_CloseLoop(void)
 {
@@ -861,7 +869,7 @@ void PowerStage_CloseLoop_CVCC_1kHz(void)
 void Buck_UI_Init(void)
 {
     HAL_ADCEx_Calibration_Start(&hadc1);
-    //HAL_ADCEx_Calibration_Start(&hadc2);
+    HAL_ADCEx_Calibration_Start(&hadc2);
 
     PowerStage_Stop();
 
@@ -874,12 +882,13 @@ void Buck_UI_Init(void)
 		//while(!adc_calib_offset);
 }
 uint32_t lastTime_readTemp = 0;
+float temp_new;
 void handle_temp(){
-		if(HAL_GetTick() -  lastTime_readTemp > 2000)
+		if(HAL_GetTick() -  lastTime_readTemp > 500)
 		{
 			lastTime_readTemp = HAL_GetTick();
-			float temp_new = Read_NTC_Temp();
-			PowerStage.temp = PowerStage.temp * 0.5f + temp_new * 0.5f;
+			temp_new = Read_NTC_Temp();
+			PowerStage.temp = PowerStage.temp * 0.9f + temp_new * 0.1f;
 			if(PowerStage.temp >= 40.0f)
 			{
 				HAL_GPIO_WritePin(GPIOC, GPIO_PIN_15, 1);
@@ -901,18 +910,18 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     float vout_new = Read_Vout(adc_avg[0]);
     float current_new = Read_Current(adc_avg[1]);
    
-    PowerStage.vin += 0.8f * (vin_new - PowerStage.vin);
-    PowerStage.vout += 0.8f * (vout_new - PowerStage.vout);
-    PowerStage.current += 0.8f * (current_new - PowerStage.current);
+    PowerStage.vin += 0.4f * (vin_new - PowerStage.vin);
+    PowerStage.vout += 0.4f * (vout_new - PowerStage.vout);
+    PowerStage.current += 0.4f * (current_new - PowerStage.current);
 
     /* Learn the actual source voltage while output is off. */
 //    PowerStage_UpdateIdleVinReference();
-		PowerStage_Control_OpenLoop();
+		//PowerStage_Control_OpenLoop();
     /* CloseLoop handles OFF, protection, CV, CC and Vin-droop limiting. */
-//    PowerStage_CloseLoop_CVCC_1kHz();
+    PowerStage_CloseLoop_CVCC_1kHz();
 }
 
-#define ADC_AVG_SAMPLES 4
+#define ADC_AVG_SAMPLES 30
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
     if(hadc->Instance == ADC1)
@@ -988,7 +997,6 @@ int main(void)
      *  - TIM3 1 kHz control interrupt
      *  - ST7789 init is performed by BBUI_Init()
      */
-		 HAL_Delay(1000);
     Buck_UI_Init();
 		PowerStage_Start();
     /* Normal buck-boost path selected at boot. */
@@ -1015,9 +1023,8 @@ int main(void)
      *  TIM4 encoder -> ISET
      *  PB9          -> Output ON/OFF
      */
-		test_tim2 = (int16_t)__HAL_TIM_GET_COUNTER(&htim2);
-    test_tim4 = (int16_t)__HAL_TIM_GET_COUNTER(&htim4);
-    //BBUI_Task();
+		
+    BBUI_Task();
 
     /* Slow NTC / fan handling */
     handle_temp();
@@ -1216,7 +1223,7 @@ static void MX_SPI1_Init(void)
   hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi1.Init.NSS = SPI_NSS_SOFT;
-  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_4;
   hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
@@ -1252,7 +1259,7 @@ static void MX_TIM1_Init(void)
 
   /* USER CODE END TIM1_Init 1 */
   htim1.Instance = TIM1;
-  htim1.Init.Prescaler = 4;
+  htim1.Init.Prescaler = 5;
   htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim1.Init.Period = 1000;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;

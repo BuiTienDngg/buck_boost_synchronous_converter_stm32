@@ -41,7 +41,7 @@ typedef struct
     uint8_t enable;
     BBUI_State_t state;
 
-    /* Keep these fields for compatibility with the current PowerStage object */
+    /* Compatibility with existing PowerStage initializer */
     uint8_t batt_cells;
     uint8_t active_preset;
     uint8_t mqtt_enable;
@@ -53,10 +53,14 @@ typedef struct
 } BBUI_Data_t;
 
 /*
- * New hardware:
- *   TIM2 encoder -> VSET
- *   TIM4 encoder -> ISET
- *   PB9 button   -> output ON/OFF
+ * TIM2 encoder -> VSET
+ * TIM4 encoder -> ISET
+ *
+ * Encoder push:
+ *   PB4 -> voltage digit
+ *   PB8 -> current digit
+ *
+ * PB9 -> Output ON/OFF
  */
 void BBUI_Init(BBUI_Data_t *data,
                TIM_HandleTypeDef *htim_vset,
@@ -64,8 +68,6 @@ void BBUI_Init(BBUI_Data_t *data,
 
 void BBUI_Task(void);
 void BBUI_ForceRefresh(void);
-
-/* Kept for compatibility; polling is used, so IRQ is optional. */
 void BBUI_ButtonIRQ(void);
 
 #ifdef __cplusplus

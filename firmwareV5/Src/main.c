@@ -433,18 +433,114 @@ static void PowerStage_Stop(void)
 uint16_t duty_buck = 0, duty_boost = 0;
 static void PowerStage_SetRatio(float ratio)
 {
+    const float TRANSITION = 0.5f;
+    const uint32_t PWM_ARR = 990;
+
     if(ratio < POWERSTAGE_DUTY_MIN)
         ratio = POWERSTAGE_DUTY_MIN;
 
     if(ratio > POWERSTAGE_DUTY_MAX)
         ratio = POWERSTAGE_DUTY_MAX;
 
-    uint32_t ccr = (uint32_t)(ratio * (float)(1000));
-		duty_buck = ccr;
-		duty_boost = 1000 - ccr;
-		TIM1 -> CCR1 = duty_buck;
-		TIM1 -> CCR2 = duty_boost;
-    
+
+    /* =====================================================
+     * BUCK MODE
+     *
+     * ratio < 0.5
+     *
+     * Buck bridge:
+     *      Q1/Q2 PWM
+     *
+     * Boost bridge:
+     *      Q3 High-side ON
+     *      Q4 Low-side OFF
+     *
+     * V?i:
+     *
+     *      ratio = Vout / (Vin + Vout)
+     *
+     * suy ra:
+     *
+     *      D_buck = Vout / Vin
+     *             = ratio / (1 - ratio)
+     * ===================================================== */
+    if(ratio < TRANSITION)
+    {
+        float d_buck =
+            ratio / (1.0f - ratio);
+
+        if(d_buck > 1.0f)
+            d_buck = 1.0f;
+
+        duty_buck =
+            (uint32_t)(d_buck * (float)PWM_ARR);
+
+        /*
+         * High-side BOOST luôn ON
+         */
+        duty_boost = PWM_ARR;
+
+        TIM1->CCR1 = duty_buck;
+        TIM1->CCR2 = duty_boost;
+    }
+
+
+    /* =====================================================
+     * BOOST MODE
+     *
+     * ratio > 0.5
+     *
+     * Buck bridge:
+     *      Q1 High-side ON
+     *      Q2 Low-side OFF
+     *
+     * Boost bridge:
+     *      Q3/Q4 PWM
+     *
+     * High-side BOOST duty:
+     *
+     *      D_HS_boost = Vin / Vout
+     *
+     * V?i ratio hi?n t?i:
+     *
+     *      D_HS_boost = (1-ratio)/ratio
+     * ===================================================== */
+    else if(ratio > TRANSITION)
+    {
+        float d_boost_hs =
+            (1.0f - ratio) / ratio;
+
+        if(d_boost_hs > 1.0f)
+            d_boost_hs = 1.0f;
+
+        /*
+         * High-side BUCK luôn ON
+         */
+        duty_buck = PWM_ARR;
+
+        duty_boost =
+            (uint32_t)(d_boost_hs *
+                       (float)PWM_ARR);
+
+        TIM1->CCR1 = duty_buck;
+        TIM1->CCR2 = duty_boost;
+    }
+
+
+    /* =====================================================
+     * TRANSITION
+     * Vin ~= Vout
+     *
+     * C? 2 High-side ON
+     * ===================================================== */
+    else
+    {
+        duty_buck  = PWM_ARR;
+        duty_boost = PWM_ARR;
+
+        TIM1->CCR1 = duty_buck;
+        TIM1->CCR2 = duty_boost;
+    }
 }
 float duty = 0;
 static void PowerStage_Control_OpenLoop(void)
@@ -1023,7 +1119,7 @@ int main(void)
      *  TIM4 encoder -> ISET
      *  PB9          -> Output ON/OFF
      */
-		
+		HAL_GPIO_WritePin(GPIOC, GPIO_PIN_15, 1);
     BBUI_Task();
 
     /* Slow NTC / fan handling */
@@ -1223,7 +1319,7 @@ static void MX_SPI1_Init(void)
   hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi1.Init.NSS = SPI_NSS_SOFT;
-  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_4;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2;
   hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
@@ -1259,7 +1355,7 @@ static void MX_TIM1_Init(void)
 
   /* USER CODE END TIM1_Init 1 */
   htim1.Instance = TIM1;
-  htim1.Init.Prescaler = 5;
+  htim1.Init.Prescaler = 2;
   htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim1.Init.Period = 1000;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
@@ -1304,7 +1400,7 @@ static void MX_TIM1_Init(void)
   sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
   sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
   sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
-  sBreakDeadTimeConfig.DeadTime = 50;
+  sBreakDeadTimeConfig.DeadTime = 30;
   sBreakDeadTimeConfig.BreakState = TIM_BREAK_DISABLE;
   sBreakDeadTimeConfig.BreakPolarity = TIM_BREAKPOLARITY_HIGH;
   sBreakDeadTimeConfig.AutomaticOutput = TIM_AUTOMATICOUTPUT_DISABLE;

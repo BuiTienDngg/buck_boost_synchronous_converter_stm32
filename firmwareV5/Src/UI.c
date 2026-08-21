@@ -676,6 +676,24 @@ static uint8_t rendered_i_unit = 0U;
 /* Graph top-line cache */
 static char old_graph_live[48] = "";
 
+/* =========================================================
+ * RUN TIME
+ *
+ * OFF -> ON : reset to 00:00:00 and start
+ * ON        : count
+ * ON -> OFF : freeze
+ * next ON   : reset again
+ * ========================================================= */
+
+static uint8_t runtime_prev_enable = 0U;
+static uint32_t runtime_last_tick = 0U;
+static uint32_t runtime_elapsed_sec = 0U;
+static uint32_t runtime_ms_remainder = 0U;
+static uint8_t runtime_dirty = 1U;
+
+static char old_runtime_number[20] = "";
+static char old_runtime_graph[20] = "";
+
 /*
  * VSET encoder push behavior:
  *
@@ -901,6 +919,10 @@ static void invalidate_main_cache(void)
     old_out[0] = '\0';
     old_graph_live[0] = '\0';
 
+    old_runtime_number[0] = '\0';
+    old_runtime_graph[0] = '\0';
+    runtime_dirty = 1U;
+
     memset(rendered_vset, 0, sizeof(rendered_vset));
     memset(rendered_iset, 0, sizeof(rendered_iset));
 
@@ -948,6 +970,155 @@ static void filter_task(void)
 }
 
 /* =========================================================
+ * RUN TIME
+ * ========================================================= */
+
+static void runtime_task(void)
+{
+    if(ui == NULL)
+        return;
+
+    uint32_t now = HAL_GetTick();
+    uint8_t enabled = (ui->enable != 0U) ? 1U : 0U;
+
+    /*
+     * New output session.
+     */
+    if((runtime_prev_enable == 0U) &&
+       (enabled != 0U))
+    {
+        runtime_elapsed_sec = 0U;
+        runtime_ms_remainder = 0U;
+        runtime_last_tick = now;
+        runtime_dirty = 1U;
+    }
+    /*
+     * Continue current session.
+     *
+     * Unsigned subtraction handles HAL_GetTick() wrap-around.
+     */
+    else if((runtime_prev_enable != 0U) &&
+            (enabled != 0U))
+    {
+        uint32_t delta =
+            (uint32_t)(now - runtime_last_tick);
+
+        runtime_last_tick = now;
+
+        uint32_t total_ms =
+            runtime_ms_remainder + delta;
+
+        if(total_ms >= 1000U)
+        {
+            runtime_elapsed_sec +=
+                total_ms / 1000U;
+
+            runtime_ms_remainder =
+                total_ms % 1000U;
+
+            runtime_dirty = 1U;
+        }
+        else
+        {
+            runtime_ms_remainder = total_ms;
+        }
+    }
+    /*
+     * Output turned OFF / protection tripped:
+     * keep the final elapsed value frozen.
+     */
+    else if((runtime_prev_enable != 0U) &&
+            (enabled == 0U))
+    {
+        uint32_t delta =
+            (uint32_t)(now - runtime_last_tick);
+
+        uint32_t total_ms =
+            runtime_ms_remainder + delta;
+
+        runtime_elapsed_sec +=
+            total_ms / 1000U;
+
+        runtime_ms_remainder =
+            total_ms % 1000U;
+
+        runtime_last_tick = now;
+        runtime_dirty = 1U;
+    }
+    else
+    {
+        runtime_last_tick = now;
+    }
+
+    runtime_prev_enable = enabled;
+}
+
+static void runtime_format(char *buf,
+                           uint16_t size)
+{
+    uint32_t total = runtime_elapsed_sec;
+
+    uint32_t hours =
+        total / 3600U;
+
+    uint32_t minutes =
+        (total / 60U) % 60U;
+
+    uint32_t seconds =
+        total % 60U;
+
+    snprintf(
+        buf,
+        size,
+        "%02lu:%02lu:%02lu",
+        (unsigned long)hours,
+        (unsigned long)minutes,
+        (unsigned long)seconds
+    );
+}
+
+static void draw_runtime_number(void)
+{
+    char buf[20];
+
+    runtime_format(buf, sizeof(buf));
+
+    /*
+     * Reuse the old CV/CC + ON/OFF area.
+     */
+    draw_text_diff(
+        218,
+        180,
+        2,
+        C_WHITE,
+        buf,
+        old_runtime_number,
+        sizeof(old_runtime_number)
+    );
+}
+
+static void draw_runtime_graph(void)
+{
+    char buf[20];
+
+    runtime_format(buf, sizeof(buf));
+
+    /*
+     * Same location as NUMBER: old CV/CC + ON/OFF area.
+     */
+    draw_text_diff(
+        218,
+        180,
+        2,
+        C_WHITE,
+        buf,
+        old_runtime_graph,
+        sizeof(old_runtime_graph)
+    );
+}
+
+
+/* =========================================================
  * NUMBER UI
  * ========================================================= */
 
@@ -970,6 +1141,9 @@ static void draw_number_static(void)
 
     ST7789_PutString(4,   210, "VSET", 2, C_VOLT, C_BG);
     ST7789_PutString(164, 210, "ISET", 2, C_CURR, C_BG);
+
+    /* Runtime replaces CV/CC + ON/OFF. */
+    ST7789_PutString(218, 170, "RUN", 1, C_MUTED, C_BG);
 
     invalidate_main_cache();
 }
@@ -1049,47 +1223,10 @@ static void draw_number_measurements(void)
 
 static void draw_number_status(void)
 {
-    if(ui == NULL)
-        return;
-
-    const char *st = state_text(ui->state);
-
-    if(status_dirty || strcmp(old_state, st) != 0)
-    {
-        ST7789_DrawFilledRectangle(208, 180, 60, 18, C_BG);
-
-        ST7789_PutString(
-            210,
-            180,
-            st,
-            2,
-            state_color(ui->state),
-            C_BG
-        );
-
-        strncpy(old_state, st, sizeof(old_state)-1U);
-        old_state[sizeof(old_state)-1U] = '\0';
-    }
-
-    const char *out = ui->enable ? "ON" : "OFF";
-
-    if(status_dirty || strcmp(old_out, out) != 0)
-    {
-        ST7789_DrawFilledRectangle(272, 180, 45, 18, C_BG);
-
-        ST7789_PutString(
-            272,
-            180,
-            out,
-            2,
-            ui->enable ? C_ON : C_OFF,
-            C_BG
-        );
-
-        strncpy(old_out, out, sizeof(old_out)-1U);
-        old_out[sizeof(old_out)-1U] = '\0';
-    }
-
+    /*
+     * CV / CC / FAULT and ON / OFF are intentionally hidden.
+     * Their former display area is used by RUN TIME.
+     */
     status_dirty = 0U;
 }
 
@@ -1425,6 +1562,9 @@ static void draw_graph_static(void)
      */
     ST7789_DrawFilledRectangle(0, 176, 320, 1, C_GRID);
 
+    /* Runtime replaces CV/CC + ON/OFF. */
+    ST7789_PutString(218, 170, "RUN", 1, C_MUTED, C_BG);
+
     ST7789_PutString(4,   210, "VSET", 2, C_VOLT, C_BG);
     ST7789_PutString(164, 210, "ISET", 2, C_CURR, C_BG);
 
@@ -1443,10 +1583,6 @@ static void draw_graph_live_info(void)
 
     char buf[64];
 
-    /*
-     * Compact actual values.
-     * Character-diff redraw instead of clearing the full 158x22 block.
-     */
     snprintf(buf, sizeof(buf),
              "%.2fV %.2fA %.0fW",
              disp_vout,
@@ -1463,9 +1599,6 @@ static void draw_graph_live_info(void)
         sizeof(old_graph_live)
     );
 
-    /*
-     * Vin / Temp
-     */
     snprintf(buf, sizeof(buf),
              "Vin %.1fV  T %.0fC",
              disp_vin,
@@ -1482,69 +1615,9 @@ static void draw_graph_live_info(void)
     );
 
     /*
-     * State changes relatively rarely, so redraw only when it changed.
+     * CV/CC/FAULT and ON/OFF are no longer drawn.
+     * RUN TIME occupies that area.
      */
-    const char *st = state_text(ui->state);
-
-    if(status_dirty || strcmp(old_state, st) != 0)
-    {
-        ST7789_DrawFilledRectangle(
-            210,
-            180,
-            58,
-            18,
-            C_BG
-        );
-
-        ST7789_PutString(
-            210,
-            180,
-            st,
-            2,
-            state_color(ui->state),
-            C_BG
-        );
-
-        strncpy(
-            old_state,
-            st,
-            sizeof(old_state) - 1U
-        );
-
-        old_state[sizeof(old_state)-1U] = '\0';
-    }
-
-    const char *out =
-        ui->enable ? "ON" : "OFF";
-
-    if(status_dirty || strcmp(old_out, out) != 0)
-    {
-        ST7789_DrawFilledRectangle(
-            272,
-            180,
-            45,
-            18,
-            C_BG
-        );
-
-        ST7789_PutString(
-            272,
-            180,
-            out,
-            2,
-            ui->enable ? C_ON : C_OFF,
-            C_BG
-        );
-
-        strncpy(
-            old_out,
-            out,
-            sizeof(old_out) - 1U
-        );
-
-        old_out[sizeof(old_out)-1U] = '\0';
-    }
-
     status_dirty = 0U;
 }
 
@@ -1770,6 +1843,7 @@ static void enter_live_mode(UIMode_t mode)
 
         draw_graph_static();
         draw_graph_live_info();
+        draw_runtime_graph();
         draw_graph_set_field(1U);
         draw_graph_set_field(0U);
     }
@@ -1780,6 +1854,7 @@ static void enter_live_mode(UIMode_t mode)
         draw_number_static();
         draw_number_measurements();
         draw_number_status();
+        draw_runtime_number();
         draw_number_set_field(1U);
         draw_number_set_field(0U);
     }
@@ -2744,6 +2819,12 @@ void BBUI_Init(BBUI_Data_t *data,
     protect_enable_tick = HAL_GetTick();
     protect_prev_enable = 0U;
 
+    runtime_prev_enable = 0U;
+    runtime_last_tick = HAL_GetTick();
+    runtime_elapsed_sec = 0U;
+    runtime_ms_remainder = 0U;
+    runtime_dirty = 1U;
+
     enter_live_mode(UI_MODE_NUMBER);
 }
 
@@ -2766,6 +2847,12 @@ void BBUI_Task(void)
      */
     protection_task();
     buzzer_task();
+
+    /*
+     * Count actual output run time after button/protection logic has
+     * finalized ui->enable for this loop.
+     */
+    runtime_task();
 
     blink_task();
 
@@ -2793,6 +2880,12 @@ void BBUI_Task(void)
 
         if(status_dirty)
             draw_number_status();
+
+        if(runtime_dirty)
+        {
+            draw_runtime_number();
+            runtime_dirty = 0U;
+        }
     }
     else if(screen == SCREEN_GRAPH)
     {
@@ -2816,6 +2909,12 @@ void BBUI_Task(void)
         if(status_dirty)
         {
             draw_graph_live_info();
+        }
+
+        if(runtime_dirty)
+        {
+            draw_runtime_graph();
+            runtime_dirty = 0U;
         }
     }
     else if(screen == SCREEN_SOLDER)

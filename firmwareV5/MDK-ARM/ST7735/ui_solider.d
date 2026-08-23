@@ -25,4 +25,4 @@ st7735/ui_solider.o: ..\Src\UI_Solider.c ..\Inc\UI_Solider.h \
   ..\Drivers\STM32F1xx_HAL_Driver\Inc\stm32f1xx_hal_pcd.h \
   ..\Drivers\STM32F1xx_HAL_Driver\Inc\stm32f1xx_ll_usb.h \
   ..\Drivers\STM32F1xx_HAL_Driver\Inc\stm32f1xx_hal_pcd_ex.h \
-  ..\Inc\st7789.h ..\Inc\st7789_conf.h
+  ..\Inc\st7789.h ..\Inc\st7789_conf.h ..\Inc\UI.h

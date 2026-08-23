@@ -1,5 +1,6 @@
 #include "UI_Solider.h"
 #include "st7789.h"
+#include "UI.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -49,6 +50,94 @@
 
 #define SOL_PLOT_W                    (SOL_PLOT_X1 - SOL_PLOT_X0 + 1)
 #define SOL_PLOT_H                    (SOL_PLOT_Y1 - SOL_PLOT_Y0 + 1)
+
+/* =========================================================
+ * SOLDER CONTROL - WORKING VERSION
+ *
+ * The following control constants/state are kept from the old
+ * station firmware that already controlled the soldering iron.
+ * Only the TFT rendering has been ported to ST7789 320x240.
+ * ========================================================= */
+
+#define SOLIDER_ADC_INDEX               2
+
+#define SOLIDER_PID_PERIOD_MS           100U
+#define SOLIDER_OFF_READ_DELAY_MS       50U
+#define SOLIDER_ADC_AVG_N               20U
+
+#define ALPHA_FIR                       0.5f
+
+#define SOLIDER_CCR_MAX_POWER           500U
+#define SOLIDER_CCR_OFF                 999U
+
+/* =========================================================
+ * HEATER PWM
+ *
+ * STM32F103:
+ *     TIMER   = TIM3
+ *     CHANNEL = CH2
+ *
+ * All heater power writes go through this macro.
+ * ========================================================= */
+#define SOLIDER_PWM_CCR                 (TIM3->CCR2)
+
+#define SOLIDER_PID_DT                  0.5f
+
+#define SOLIDER_KP                      0.10f
+#define SOLIDER_KI                      0.05f
+#define SOLIDER_KD                      0.000f
+
+#define SOLIDER_TEMP_MIN_C              25.0f
+#define SOLIDER_TEMP_MAX_C              500.0f
+
+#define SOL_CURRENT_EMA_ALPHA           0.12f
+
+extern volatile uint8_t adc1_dma_ready;
+extern uint16_t adc1_dma_buf[];
+extern BBUI_Data_t PowerStage;
+
+typedef enum
+{
+    SOLIDER_PID_IDLE = 0,
+    SOLIDER_PID_RUN,
+    SOLIDER_PID_OFF_WAIT,
+    SOLIDER_PID_READ_ADC
+} SoliderPID_State_t;
+
+static SoliderPID_State_t solider_pid_state = SOLIDER_PID_IDLE;
+
+static uint32_t solider_pid_tick = 0U;
+static uint32_t solider_off_tick = 0U;
+
+static uint32_t solider_adc_sum = 0U;
+static uint16_t solider_adc_count = 0U;
+
+static float solider_pid_i = 0.0f;
+static float solider_pid_prev_err = 0.0f;
+
+static float solider_current_sum = 0.0f;
+static uint16_t solider_current_count = 0U;
+
+static float solider_current_avg = 0.0f;
+static float solider_current_filtered = 0.0f;
+static uint8_t solider_current_filter_init = 0U;
+
+volatile float solider_temp_raw = 0.0f;
+volatile float solider_pid_power = 0.0f;
+volatile uint16_t solider_pwm_ccr = SOLIDER_CCR_OFF;
+
+volatile float measured_temp;
+volatile float frev_measured_temp;
+volatile float set_temp;
+
+static uint16_t ccr = SOLIDER_CCR_OFF;
+static float power_ = 0.0f;
+
+/* Forward declarations for control functions used by UI entry/task. */
+static float clampf_solider(float x, float min, float max);
+static void Solider_SetPower(float power);
+static void Solider_PID_Reset(void);
+static float Solider_PID_Compute(float set_temp_, float measured_temp_);
 
 /* =========================================================
  * INTERNAL
@@ -602,11 +691,17 @@ void UI_Solider_Enter(void)
     lcd_tick = HAL_GetTick();
 
     clear_caches();
+
+    /* Start the same proven heater-control state machine. */
+    Solider_PID_Enable(1U);
 }
 
 void UI_Solider_Exit(void)
 {
     sol_active = 0U;
+
+    /* Always turn the heater OFF when leaving SOLDER mode. */
+    Solider_PID_Enable(0U);
 }
 
 uint8_t UI_Solider_IsActive(void)
@@ -689,6 +784,13 @@ void UI_Solider_Task(uint8_t force)
     if(!sol_active)
         return;
 
+    /*
+     * Self-contained control: the PID state machine runs whenever
+     * SOLDER screen is active. Do not call Solider_PID_Task() a
+     * second time elsewhere in the main loop.
+     */
+    Solider_PID_Task(0.0f);
+
     if(force || force_redraw)
     {
         force_redraw = 0U;
@@ -713,3 +815,309 @@ void UI_Solider_Task(uint8_t force)
         update_values(0U);
     }
 }
+
+/* =========================================================
+ * SOLDER ADC -> TEMPERATURE
+ *
+ * Preserved from the working station firmware:
+ *     temp = (ADC - 450) * 1.85
+ * ========================================================= */
+
+static float clampf_solider(float x, float min, float max)
+{
+    if(x < min) return min;
+    if(x > max) return max;
+    return x;
+}
+
+float Solider_ADC_ToTemp(uint16_t adc_raw)
+{
+    float temp =
+        ((float)adc_raw - 1200.0f);
+    temp = clampf_solider(
+        temp,
+        SOLIDER_TEMP_MIN_C,
+        SOLIDER_TEMP_MAX_C
+    );
+
+    return temp;
+}
+
+/* =========================================================
+ * HEATER POWER
+ *
+ * Preserved mapping:
+ *     power = 1.0 -> CCR = 200  : maximum heat
+ *     power = 0.0 -> CCR = 1000 : heater OFF
+ * ========================================================= */
+
+static void Solider_SetPower(float power)
+{
+    power = clampf_solider(power, 0.0f, 1.0f);
+
+    ccr = (uint16_t)(
+        SOLIDER_CCR_OFF -
+        power *
+        (float)(SOLIDER_CCR_OFF - SOLIDER_CCR_MAX_POWER)
+    );
+
+    if(ccr > SOLIDER_CCR_OFF)
+        ccr = SOLIDER_CCR_OFF;
+
+    if(ccr < SOLIDER_CCR_MAX_POWER)
+        ccr = SOLIDER_CCR_MAX_POWER;
+
+    SOLIDER_PWM_CCR = ccr;
+
+    solider_pid_power = power;
+    solider_pwm_ccr = ccr;
+}
+
+static void Solider_PID_Reset(void)
+{
+    solider_pid_i = 0.0f;
+    solider_pid_prev_err = 0.0f;
+
+    solider_adc_sum = 0U;
+    solider_adc_count = 0U;
+
+    solider_pid_power = 0.0f;
+    solider_pwm_ccr = SOLIDER_CCR_OFF;
+
+    solider_current_sum = 0.0f;
+    solider_current_count = 0U;
+    solider_current_avg = 0.0f;
+
+    solider_current_filtered = 0.0f;
+    solider_current_filter_init = 0U;
+
+
+    SOLIDER_PWM_CCR = SOLIDER_CCR_OFF;
+}
+
+void Solider_PID_Enable(uint8_t enable)
+{
+    if(enable)
+    {
+        if(solider_pid_state == SOLIDER_PID_IDLE)
+        {
+            Solider_PID_Reset();
+            solider_pid_tick = HAL_GetTick();
+            solider_pid_state = SOLIDER_PID_RUN;
+        }
+    }
+    else
+    {
+        solider_pid_state = SOLIDER_PID_IDLE;
+        Solider_PID_Reset();
+    }
+}
+
+static float Solider_PID_Compute(float set_temp_,
+                                 float measured_temp_)
+{
+    float err = set_temp_ - measured_temp_;
+
+    float p = SOLIDER_KP * err;
+
+    float d =
+        SOLIDER_KD *
+        (err - solider_pid_prev_err) /
+        SOLIDER_PID_DT;
+
+    float i_new =
+        solider_pid_i +
+        SOLIDER_KI * err * SOLIDER_PID_DT;
+
+    float out_unsat = p + i_new + d;
+
+    /* Same anti-windup logic as the working firmware. */
+    if(!((out_unsat > 1.0f && err > 0.0f) ||
+         (out_unsat < 0.0f && err < 0.0f)))
+    {
+        solider_pid_i = i_new;
+    }
+
+    solider_pid_i =
+        clampf_solider(solider_pid_i, -0.5f, 1.0f);
+
+    float out =
+        p + solider_pid_i + d;
+
+    out =
+        clampf_solider(out, 0.0f, 1.0f);
+
+    solider_pid_prev_err = err;
+
+    return out;
+}
+
+/* =========================================================
+ * NON-BLOCKING SOLDER CONTROL STATE MACHINE
+ *
+ * RUN:
+ *   - heater active according to previous PID output
+ *   - accumulate current samples
+ *   - every 100 ms turn heater OFF
+ *
+ * OFF_WAIT:
+ *   - wait 50 ms for switching noise to settle
+ *
+ * READ_ADC:
+ *   - average 20 ADC samples
+ *   - convert to temperature
+ *   - FIR filter
+ *   - PID compute
+ *   - apply heater power
+ *   - update TFT data
+ *   - return RUN
+ * ========================================================= */
+
+void Solider_PID_Task(float set_adc)
+{
+    /* Retained only for compatibility with the old API. */
+    (void)set_adc;
+
+    uint32_t now = HAL_GetTick();
+
+    switch(solider_pid_state)
+    {
+        case SOLIDER_PID_IDLE:
+        {
+            SOLIDER_PWM_CCR = SOLIDER_CCR_OFF;
+        }
+        break;
+
+        case SOLIDER_PID_RUN:
+        {
+            float current_sample = PowerStage.current;
+
+            if(current_sample >= 0.0f &&
+               current_sample <= SOL_CURR_MAX)
+            {
+                solider_current_sum += current_sample;
+                solider_current_count++;
+            }
+
+            if((uint32_t)(now - solider_pid_tick) >=
+               SOLIDER_PID_PERIOD_MS)
+            {
+                solider_pid_tick = now;
+
+                if(solider_current_count > 0U)
+                {
+                    solider_current_avg =
+                        solider_current_sum /
+                        (float)solider_current_count;
+
+                    if(solider_current_filter_init == 0U)
+                    {
+                        solider_current_filtered =
+                            solider_current_avg;
+
+                        solider_current_filter_init = 1U;
+                    }
+                    else
+                    {
+                        solider_current_filtered =
+                            (1.0f - SOL_CURRENT_EMA_ALPHA) *
+                            solider_current_filtered +
+                            SOL_CURRENT_EMA_ALPHA *
+                            solider_current_avg;
+                    }
+                }
+
+                solider_current_sum = 0.0f;
+                solider_current_count = 0U;
+
+                /* Heater OFF before sensing tip temperature. */
+                SOLIDER_PWM_CCR = SOLIDER_CCR_OFF;
+
+                solider_off_tick = now;
+                solider_adc_sum = 0U;
+                solider_adc_count = 0U;
+                adc1_dma_ready = 0U;
+
+                solider_pid_state = SOLIDER_PID_OFF_WAIT;
+            }
+        }
+        break;
+
+        case SOLIDER_PID_OFF_WAIT:
+        {
+            if((uint32_t)(now - solider_off_tick) >=
+               SOLIDER_OFF_READ_DELAY_MS)
+            {
+                solider_adc_sum = 0U;
+                solider_adc_count = 0U;
+                adc1_dma_ready = 0U;
+
+                solider_pid_state = SOLIDER_PID_READ_ADC;
+            }
+        }
+        break;
+
+        case SOLIDER_PID_READ_ADC:
+        {
+            if(adc1_dma_ready)
+            {
+                adc1_dma_ready = 0U;
+
+                solider_adc_sum +=
+                    adc1_dma_buf[SOLIDER_ADC_INDEX];
+
+                solider_adc_count++;
+
+                if(solider_adc_count >= SOLIDER_ADC_AVG_N)
+                {
+                    uint16_t adc_avg =
+                        (uint16_t)(
+                            solider_adc_sum /
+                            SOLIDER_ADC_AVG_N
+                        );
+
+                    solider_temp_raw = (float)adc_avg;
+
+                    measured_temp =
+                        Solider_ADC_ToTemp(adc_avg);
+
+                    measured_temp =
+                        measured_temp * ALPHA_FIR +
+                        frev_measured_temp *
+                        (1.0f - ALPHA_FIR);
+
+                    frev_measured_temp = measured_temp;
+
+                    set_temp =
+                        UI_Solider_GetSetTemp();
+
+                    power_ =
+                        Solider_PID_Compute(
+                            set_temp,
+                            measured_temp
+                        );
+
+                    Solider_SetPower(power_);
+
+                    UI_Solider_SetData(
+                        measured_temp,
+                        solider_current_filtered,
+                        PowerStage.temp,
+                        solider_current_filtered * PowerStage.vout
+                    );
+
+                    solider_pid_state = SOLIDER_PID_RUN;
+                }
+            }
+        }
+        break;
+
+        default:
+        {
+            solider_pid_state = SOLIDER_PID_IDLE;
+            Solider_PID_Reset();
+        }
+        break;
+    }
+}
+

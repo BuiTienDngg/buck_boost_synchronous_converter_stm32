@@ -41,6 +41,23 @@ void UI_Solider_EncoderAdjust(int8_t dir);
 
 void UI_Solider_Task(uint8_t force);
 
+
+/* =========================================================
+ * SOLDER CONTROL
+ * ========================================================= */
+
+void Solider_PID_Enable(uint8_t enable);
+void Solider_PID_Task(float set_adc);
+float Solider_ADC_ToTemp(uint16_t adc_raw);
+
+extern volatile float solider_temp_raw;
+extern volatile float solider_pid_power;
+extern volatile uint16_t solider_pwm_ccr;
+
+extern volatile float measured_temp;
+extern volatile float frev_measured_temp;
+extern volatile float set_temp;
+
 #ifdef __cplusplus
 }
 #endif

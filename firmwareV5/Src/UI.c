@@ -34,11 +34,11 @@
 #define BUZZER_IDLE_STATE              GPIO_PIN_RESET
 
 /* Optional old power-route / relay output. Set 1 if PB15 is still used. */
-#define SOLDER_ROUTE_ENABLE            0U
+#define SOLDER_ROUTE_ENABLE            1U
 #define SOLDER_ROUTE_PORT              GPIOB
 #define SOLDER_ROUTE_PIN               GPIO_PIN_15
 
-#define SOLDER_BB_VSET                 24.0f
+#define SOLDER_BB_VSET                 20.0f
 #define SOLDER_BB_ISET                 7.0f
 
 #define BTN_ACTIVE                     GPIO_PIN_RESET
@@ -1917,9 +1917,12 @@ static void enter_solder_mode(void)
     protection_arm();
 
 #if SOLDER_ROUTE_ENABLE
+    /*
+     * SOLDER route ON.
+     */
     HAL_GPIO_WritePin(SOLDER_ROUTE_PORT,
                       SOLDER_ROUTE_PIN,
-                      GPIO_PIN_RESET);
+                      GPIO_PIN_SET);
 #endif
 
     UI_Solider_Enter();
@@ -1956,9 +1959,12 @@ static void exit_solder_mode(void)
         ui->state = BBUI_STATE_OFF;
 
 #if SOLDER_ROUTE_ENABLE
+    /*
+     * Return to normal POWER route.
+     */
     HAL_GPIO_WritePin(SOLDER_ROUTE_PORT,
                       SOLDER_ROUTE_PIN,
-                      GPIO_PIN_SET);
+                      GPIO_PIN_RESET);
 #endif
 
     enter_live_mode(solder_return_ui_mode);
@@ -2162,10 +2168,13 @@ static void abort_solder_on_fault(void)
     ui->state = BBUI_STATE_FAULT;
 
 #if SOLDER_ROUTE_ENABLE
+    /*
+     * Fault must also leave the SOLDER power route.
+     */
     HAL_GPIO_WritePin(
         SOLDER_ROUTE_PORT,
         SOLDER_ROUTE_PIN,
-        GPIO_PIN_SET
+        GPIO_PIN_RESET
     );
 #endif
 
@@ -2794,10 +2803,10 @@ void BBUI_Init(BBUI_Data_t *data,
     solder_detect_tick = HAL_GetTick();
 
 #if SOLDER_ROUTE_ENABLE
-    /* Normal power route at startup. */
+    /* Normal POWER route at startup. */
     HAL_GPIO_WritePin(SOLDER_ROUTE_PORT,
                       SOLDER_ROUTE_PIN,
-                      GPIO_PIN_SET);
+                      GPIO_PIN_RESET);
 #endif
 
     if(ui != NULL)

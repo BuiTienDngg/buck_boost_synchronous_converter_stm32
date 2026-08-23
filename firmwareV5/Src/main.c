@@ -1103,6 +1103,7 @@ int main(void)
 
     /* Fan/control output initial state */
     HAL_GPIO_WritePin(GPIOC, GPIO_PIN_15, GPIO_PIN_SET);
+		HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -1119,7 +1120,6 @@ int main(void)
      *  TIM4 encoder -> ISET
      *  PB9          -> Output ON/OFF
      */
-		HAL_GPIO_WritePin(GPIOC, GPIO_PIN_15, 1);
     BBUI_Task();
 
     /* Slow NTC / fan handling */

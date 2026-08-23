@@ -25,6 +25,19 @@ void UI_Solider_Init(void);
 void UI_Solider_Enter(void);
 void UI_Solider_Exit(void);
 uint8_t UI_Solider_IsActive(void);
+uint8_t UI_Solider_IsSleeping(void);
+
+typedef enum
+{
+    UI_SOLDER_EVENT_NONE           = 0x00U,
+    UI_SOLDER_EVENT_ENTER          = 0x01U,
+    UI_SOLDER_EVENT_SLEEP_ENTER    = 0x02U,
+    UI_SOLDER_EVENT_TARGET_REACHED = 0x04U
+} UI_Solider_Event_t;
+
+uint8_t UI_Solider_GetEvents(void);
+void UI_Solider_SetSleep(uint8_t sleep, float sleep_temp);
+void UI_Solider_SetTheme(uint8_t light);
 
 void UI_Solider_SetData(float tip_temp,
                         float current,

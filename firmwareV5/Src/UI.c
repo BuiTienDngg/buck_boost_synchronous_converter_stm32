@@ -18,9 +18,16 @@
 #define BTN_OUT_PORT                   GPIOB
 #define BTN_OUT_PIN                    GPIO_PIN_9
 
-/* External SOLDER request: falling edge HIGH -> LOW */
-#define SOLDER_DETECT_PORT             GPIOB
-#define SOLDER_DETECT_PIN              GPIO_PIN_11
+/*
+ * SOLDER sleep sensor:
+ *   PB11 LOW  = iron in holder  -> SLEEP
+ *   PB11 HIGH = iron removed    -> WAKE
+ * PB11 no longer enters SOLDER.
+ */
+#define SOLDER_SLEEP_PORT              GPIOB
+#define SOLDER_SLEEP_PIN               GPIO_PIN_11
+#define SOLDER_SLEEP_ACTIVE            GPIO_PIN_RESET
+#define SOLDER_SLEEP_DEBOUNCE_MS       150U
 
 /*
  * BUZZER control.
@@ -33,12 +40,18 @@
 #define BUZZER_ACTIVE_STATE            GPIO_PIN_SET
 #define BUZZER_IDLE_STATE              GPIO_PIN_RESET
 
+/* Blue Pill PC13 onboard LED is active-low. */
+#define STATUS_LED_PORT                GPIOC
+#define STATUS_LED_PIN                 GPIO_PIN_13
+#define STATUS_LED_ACTIVE_STATE        GPIO_PIN_RESET
+#define STATUS_LED_IDLE_STATE          GPIO_PIN_SET
+
 /* Optional old power-route / relay output. Set 1 if PB15 is still used. */
 #define SOLDER_ROUTE_ENABLE            1U
 #define SOLDER_ROUTE_PORT              GPIOB
 #define SOLDER_ROUTE_PIN               GPIO_PIN_15
 
-#define SOLDER_BB_VSET                 20.0f
+#define SOLDER_BB_VSET                 24.0f
 #define SOLDER_BB_ISET                 7.0f
 
 #define BTN_ACTIVE                     GPIO_PIN_RESET
@@ -47,6 +60,9 @@
 #define ENC_COUNTS_PER_DETENT          4
 #define MENU_HOLD_MS                   1000U
 #define SOLDER_HOLD_MS                 1000U
+
+/* 1 = boot directly to SOLDER, 0 = boot to NUMBER. */
+#define BOOT_DEFAULT_SOLDER            0U
 
 /* =========================================================
  * RANGE
@@ -57,6 +73,30 @@
 
 #define ISET_MIN                       0.10f
 #define ISET_MAX                       10.00f
+
+
+/* =========================================================
+ * USER SETTINGS
+ * ========================================================= */
+
+#define SLEEP_TEMP_DEFAULT             200.0f
+#define SLEEP_TEMP_MIN                 150.0f
+#define SLEEP_TEMP_MAX                 300.0f
+#define SLEEP_TEMP_STEP                  5.0f
+
+typedef enum
+{
+    UI_THEME_DARK = 0,
+    UI_THEME_LIGHT
+} UITheme_t;
+
+static float sleep_temp = SLEEP_TEMP_DEFAULT;
+static uint8_t buzzer_button_enable = 1U;
+static UITheme_t ui_theme = UI_THEME_DARK;
+
+static float menu_sleep_temp = SLEEP_TEMP_DEFAULT;
+static uint8_t menu_buzzer_button_enable = 1U;
+static UITheme_t menu_theme = UI_THEME_DARK;
 
 
 /* =========================================================
@@ -154,6 +194,7 @@ static void protection_task(void);
 static uint8_t buzzer_pattern_active = 0U;
 static uint8_t buzzer_phase_on = 0U;
 static uint8_t buzzer_beep_count = 0U;
+static uint8_t buzzer_target_count = BUZZER_BEEP_COUNT;
 static uint32_t buzzer_tick = 0U;
 
 static void buzzer_write(uint8_t on)
@@ -174,14 +215,29 @@ static void buzzer_stop(void)
     buzzer_write(0U);
 }
 
-static void buzzer_fault_start(void)
+static void buzzer_start(uint8_t beep_count)
 {
+    if(beep_count == 0U)
+        return;
+
     buzzer_pattern_active = 1U;
     buzzer_phase_on = 1U;
     buzzer_beep_count = 0U;
+    buzzer_target_count = beep_count;
     buzzer_tick = HAL_GetTick();
 
     buzzer_write(1U);
+}
+
+static void buzzer_button_start(void)
+{
+    if(buzzer_button_enable)
+        buzzer_start(1U);
+}
+
+static void buzzer_fault_start(void)
+{
+    buzzer_start(BUZZER_BEEP_COUNT);
 }
 
 static void buzzer_task(void)
@@ -201,7 +257,7 @@ static void buzzer_task(void)
 
             buzzer_write(0U);
 
-            if(buzzer_beep_count >= BUZZER_BEEP_COUNT)
+            if(buzzer_beep_count >= buzzer_target_count)
             {
                 buzzer_pattern_active = 0U;
             }
@@ -235,15 +291,12 @@ static void buzzer_task(void)
  * ========================================================= */
 
 #define UI_FLASH_PAGE_ADDR              0x0800FC00U
-#define UI_FLASH_MAGIC                  0x42554242U   /* "BUBB" */
+#define UI_FLASH_MAGIC                  0x42554242U
 
 #define UI_FLASH_VERSION_V1             0x00010001U
-#define UI_FLASH_VERSION                0x00010002U
+#define UI_FLASH_VERSION_V2             0x00010002U
+#define UI_FLASH_VERSION                0x00010003U
 
-/*
- * Previous firmware format.
- * Kept so old saved VSET/ISET can still be restored.
- */
 typedef struct
 {
     uint32_t magic;
@@ -253,206 +306,118 @@ typedef struct
     uint32_t checksum;
 } UIFlashDataV1_t;
 
-/*
- * Current format.
- */
 typedef struct
 {
     uint32_t magic;
     uint32_t version;
-
     uint32_t vset_x100;
     uint32_t iset_x100;
-
     uint32_t ovp_x100;
     uint32_t ocp_x100;
     uint32_t opp_x10;
+    uint32_t checksum;
+} UIFlashDataV2_t;
 
+typedef struct
+{
+    uint32_t magic;
+    uint32_t version;
+    uint32_t vset_x100;
+    uint32_t iset_x100;
+    uint32_t ovp_x100;
+    uint32_t ocp_x100;
+    uint32_t opp_x10;
+    uint32_t sleep_temp_x10;
+    uint32_t buzzer_button_enable;
+    uint32_t theme;
     uint32_t checksum;
 } UIFlashData_t;
 
 static uint32_t ui_flash_checksum_v1(const UIFlashDataV1_t *d)
 {
-    return d->magic ^
-           d->version ^
-           d->vset_x100 ^
-           d->iset_x100 ^
-           0x5A5AA5A5U;
+    return d->magic ^ d->version ^ d->vset_x100 ^ d->iset_x100 ^ 0x5A5AA5A5U;
+}
+
+static uint32_t ui_flash_checksum_v2(const UIFlashDataV2_t *d)
+{
+    return d->magic ^ d->version ^ d->vset_x100 ^ d->iset_x100 ^
+           d->ovp_x100 ^ d->ocp_x100 ^ d->opp_x10 ^ 0x5A5AA5A5U;
 }
 
 static uint32_t ui_flash_checksum(const UIFlashData_t *d)
 {
-    return d->magic ^
-           d->version ^
-           d->vset_x100 ^
-           d->iset_x100 ^
-           d->ovp_x100 ^
-           d->ocp_x100 ^
-           d->opp_x10 ^
-           0x5A5AA5A5U;
+    return d->magic ^ d->version ^ d->vset_x100 ^ d->iset_x100 ^
+           d->ovp_x100 ^ d->ocp_x100 ^ d->opp_x10 ^ d->sleep_temp_x10 ^
+           d->buzzer_button_enable ^ d->theme ^ 0x5A5AA5A5U;
 }
 
 static uint8_t ui_flash_read(float *vset, float *iset)
 {
-    const uint32_t *raw =
-        (const uint32_t *)UI_FLASH_PAGE_ADDR;
+    const uint32_t *raw = (const uint32_t *)UI_FLASH_PAGE_ADDR;
+    if(raw[0] != UI_FLASH_MAGIC) return 0U;
 
-    if(raw[0] != UI_FLASH_MAGIC)
-        return 0U;
-
-    /*
-     * Backward compatibility:
-     * old firmware saved VSET/ISET only.
-     */
     if(raw[1] == UI_FLASH_VERSION_V1)
     {
-        const UIFlashDataV1_t *d =
-            (const UIFlashDataV1_t *)UI_FLASH_PAGE_ADDR;
-
-        if(d->checksum != ui_flash_checksum_v1(d))
-            return 0U;
-
-        float v = (float)d->vset_x100 / 100.0f;
-        float i = (float)d->iset_x100 / 100.0f;
-
-        if(v < VSET_MIN || v > VSET_MAX)
-            return 0U;
-
-        if(i < ISET_MIN || i > ISET_MAX)
-            return 0U;
-
-        *vset = v;
-        *iset = i;
-
-        /*
-         * Protection values keep their defaults.
-         */
-        return 1U;
+        const UIFlashDataV1_t *d=(const UIFlashDataV1_t *)UI_FLASH_PAGE_ADDR;
+        if(d->checksum != ui_flash_checksum_v1(d)) return 0U;
+        float v=(float)d->vset_x100/100.0f, i=(float)d->iset_x100/100.0f;
+        if(v<VSET_MIN||v>VSET_MAX||i<ISET_MIN||i>ISET_MAX) return 0U;
+        *vset=v; *iset=i; return 1U;
     }
 
-    if(raw[1] != UI_FLASH_VERSION)
-        return 0U;
+    if(raw[1] == UI_FLASH_VERSION_V2)
+    {
+        const UIFlashDataV2_t *d=(const UIFlashDataV2_t *)UI_FLASH_PAGE_ADDR;
+        if(d->checksum != ui_flash_checksum_v2(d)) return 0U;
+        float v=(float)d->vset_x100/100.0f, i=(float)d->iset_x100/100.0f;
+        float ovp=(float)d->ovp_x100/100.0f, ocp=(float)d->ocp_x100/100.0f, opp=(float)d->opp_x10/10.0f;
+        if(v<VSET_MIN||v>VSET_MAX||i<ISET_MIN||i>ISET_MAX||
+           ovp<PROTECT_OVP_MIN||ovp>PROTECT_OVP_MAX||
+           ocp<PROTECT_OCP_MIN||ocp>PROTECT_OCP_MAX||
+           opp<PROTECT_OPP_MIN||opp>PROTECT_OPP_MAX) return 0U;
+        *vset=v; *iset=i; protect_ovp=ovp; protect_ocp=ocp; protect_opp=opp; return 1U;
+    }
 
-    const UIFlashData_t *d =
-        (const UIFlashData_t *)UI_FLASH_PAGE_ADDR;
-
-    if(d->checksum != ui_flash_checksum(d))
-        return 0U;
-
-    float v = (float)d->vset_x100 / 100.0f;
-    float i = (float)d->iset_x100 / 100.0f;
-
-    float ovp = (float)d->ovp_x100 / 100.0f;
-    float ocp = (float)d->ocp_x100 / 100.0f;
-    float opp = (float)d->opp_x10 / 10.0f;
-
-    if(v < VSET_MIN || v > VSET_MAX)
-        return 0U;
-
-    if(i < ISET_MIN || i > ISET_MAX)
-        return 0U;
-
-    if(ovp < PROTECT_OVP_MIN || ovp > PROTECT_OVP_MAX)
-        return 0U;
-
-    if(ocp < PROTECT_OCP_MIN || ocp > PROTECT_OCP_MAX)
-        return 0U;
-
-    if(opp < PROTECT_OPP_MIN || opp > PROTECT_OPP_MAX)
-        return 0U;
-
-    *vset = v;
-    *iset = i;
-
-    protect_ovp = ovp;
-    protect_ocp = ocp;
-    protect_opp = opp;
-
+    if(raw[1] != UI_FLASH_VERSION) return 0U;
+    const UIFlashData_t *d=(const UIFlashData_t *)UI_FLASH_PAGE_ADDR;
+    if(d->checksum != ui_flash_checksum(d)) return 0U;
+    float v=(float)d->vset_x100/100.0f, i=(float)d->iset_x100/100.0f;
+    float ovp=(float)d->ovp_x100/100.0f, ocp=(float)d->ocp_x100/100.0f, opp=(float)d->opp_x10/10.0f;
+    float sl=(float)d->sleep_temp_x10/10.0f;
+    if(v<VSET_MIN||v>VSET_MAX||i<ISET_MIN||i>ISET_MAX||
+       ovp<PROTECT_OVP_MIN||ovp>PROTECT_OVP_MAX||
+       ocp<PROTECT_OCP_MIN||ocp>PROTECT_OCP_MAX||
+       opp<PROTECT_OPP_MIN||opp>PROTECT_OPP_MAX||
+       sl<SLEEP_TEMP_MIN||sl>SLEEP_TEMP_MAX||
+       d->buzzer_button_enable>1U||d->theme>(uint32_t)UI_THEME_LIGHT) return 0U;
+    *vset=v; *iset=i; protect_ovp=ovp; protect_ocp=ocp; protect_opp=opp;
+    sleep_temp=sl; buzzer_button_enable=(uint8_t)d->buzzer_button_enable; ui_theme=(UITheme_t)d->theme;
     return 1U;
 }
 
 static uint8_t ui_flash_save(float vset, float iset)
 {
-    UIFlashData_t new_data;
+    UIFlashData_t n;
+    n.magic=UI_FLASH_MAGIC; n.version=UI_FLASH_VERSION;
+    n.vset_x100=(uint32_t)(vset*100.0f+0.5f); n.iset_x100=(uint32_t)(iset*100.0f+0.5f);
+    n.ovp_x100=(uint32_t)(protect_ovp*100.0f+0.5f); n.ocp_x100=(uint32_t)(protect_ocp*100.0f+0.5f);
+    n.opp_x10=(uint32_t)(protect_opp*10.0f+0.5f); n.sleep_temp_x10=(uint32_t)(sleep_temp*10.0f+0.5f);
+    n.buzzer_button_enable=(uint32_t)buzzer_button_enable; n.theme=(uint32_t)ui_theme; n.checksum=ui_flash_checksum(&n);
+    const UIFlashData_t *o=(const UIFlashData_t *)UI_FLASH_PAGE_ADDR;
+    if(o->magic==n.magic&&o->version==n.version&&o->vset_x100==n.vset_x100&&o->iset_x100==n.iset_x100&&
+       o->ovp_x100==n.ovp_x100&&o->ocp_x100==n.ocp_x100&&o->opp_x10==n.opp_x10&&
+       o->sleep_temp_x10==n.sleep_temp_x10&&o->buzzer_button_enable==n.buzzer_button_enable&&
+       o->theme==n.theme&&o->checksum==n.checksum) return 1U;
 
-    new_data.magic = UI_FLASH_MAGIC;
-    new_data.version = UI_FLASH_VERSION;
-
-    new_data.vset_x100 =
-        (uint32_t)(vset * 100.0f + 0.5f);
-
-    new_data.iset_x100 =
-        (uint32_t)(iset * 100.0f + 0.5f);
-
-    new_data.ovp_x100 =
-        (uint32_t)(protect_ovp * 100.0f + 0.5f);
-
-    new_data.ocp_x100 =
-        (uint32_t)(protect_ocp * 100.0f + 0.5f);
-
-    new_data.opp_x10 =
-        (uint32_t)(protect_opp * 10.0f + 0.5f);
-
-    new_data.checksum =
-        ui_flash_checksum(&new_data);
-
-    /*
-     * Avoid erase/write if nothing changed.
-     */
-    const UIFlashData_t *old_data =
-        (const UIFlashData_t *)UI_FLASH_PAGE_ADDR;
-
-    if(old_data->magic == new_data.magic &&
-       old_data->version == new_data.version &&
-       old_data->vset_x100 == new_data.vset_x100 &&
-       old_data->iset_x100 == new_data.iset_x100 &&
-       old_data->ovp_x100 == new_data.ovp_x100 &&
-       old_data->ocp_x100 == new_data.ocp_x100 &&
-       old_data->opp_x10 == new_data.opp_x10 &&
-       old_data->checksum == new_data.checksum)
+    HAL_FLASH_Unlock(); FLASH_EraseInitTypeDef e={0}; uint32_t pe=0U;
+    e.TypeErase=FLASH_TYPEERASE_PAGES; e.PageAddress=UI_FLASH_PAGE_ADDR; e.NbPages=1U;
+    if(HAL_FLASHEx_Erase(&e,&pe)!=HAL_OK){HAL_FLASH_Lock();return 0U;}
+    const uint16_t *s=(const uint16_t *)&n; uint32_t a=UI_FLASH_PAGE_ADDR;
+    for(uint32_t k=0U;k<sizeof(UIFlashData_t)/2U;k++,a+=2U)
     {
-        return 1U;
+        if(HAL_FLASH_Program(FLASH_TYPEPROGRAM_HALFWORD,a,s[k])!=HAL_OK){HAL_FLASH_Lock();return 0U;}
     }
-
-    HAL_FLASH_Unlock();
-
-    FLASH_EraseInitTypeDef erase = {0};
-    uint32_t page_error = 0U;
-
-    erase.TypeErase = FLASH_TYPEERASE_PAGES;
-    erase.PageAddress = UI_FLASH_PAGE_ADDR;
-    erase.NbPages = 1U;
-
-    if(HAL_FLASHEx_Erase(&erase, &page_error) != HAL_OK)
-    {
-        HAL_FLASH_Lock();
-        return 0U;
-    }
-
-    const uint16_t *src =
-        (const uint16_t *)&new_data;
-
-    uint32_t addr = UI_FLASH_PAGE_ADDR;
-
-    for(uint32_t k = 0U;
-        k < sizeof(UIFlashData_t) / 2U;
-        k++)
-    {
-        if(HAL_FLASH_Program(
-               FLASH_TYPEPROGRAM_HALFWORD,
-               addr,
-               src[k]) != HAL_OK)
-        {
-            HAL_FLASH_Lock();
-            return 0U;
-        }
-
-        addr += 2U;
-    }
-
-    HAL_FLASH_Lock();
-
-    return 1U;
+    HAL_FLASH_Lock(); return 1U;
 }
 
 /* =========================================================
@@ -466,14 +431,14 @@ static uint8_t ui_flash_save(float vset, float iset)
 #define EDIT_ACTIVE_MS                 2000U
 #define BLINK_PERIOD_MS                220U
 
-#define C_BG                           ST7789_COLOR_BLACK
-#define C_WHITE                        ST7789_COLOR_WHITE
-#define C_MUTED                        ST7789_COLOR_LIGHTGREY
-#define C_GRID                         ST7789_Color_GetFromRGB(45, 50, 58)
+#define C_BG                           ((ui_theme == UI_THEME_LIGHT) ? ST7789_COLOR_WHITE : ST7789_COLOR_BLACK)
+#define C_WHITE                        ((ui_theme == UI_THEME_LIGHT) ? ST7789_COLOR_BLACK : ST7789_COLOR_WHITE)
+#define C_MUTED                        ((ui_theme == UI_THEME_LIGHT) ? ST7789_Color_GetFromRGB(75, 75, 75) : ST7789_COLOR_LIGHTGREY)
+#define C_GRID                         ((ui_theme == UI_THEME_LIGHT) ? ST7789_Color_GetFromRGB(205, 205, 205) : ST7789_Color_GetFromRGB(45, 50, 58))
 
-#define C_VOLT                         ST7789_COLOR_CYAN
-#define C_CURR                         ST7789_COLOR_YELLOW
-#define C_POWER                        ST7789_COLOR_ORANGE
+#define C_VOLT                         ((ui_theme == UI_THEME_LIGHT) ? ST7789_COLOR_BLUE : ST7789_COLOR_CYAN)
+#define C_CURR                         ((ui_theme == UI_THEME_LIGHT) ? ST7789_Color_GetFromRGB(175, 115, 0) : ST7789_COLOR_YELLOW)
+#define C_POWER                        ((ui_theme == UI_THEME_LIGHT) ? ST7789_COLOR_RED : ST7789_COLOR_ORANGE)
 
 #define C_ON                           ST7789_COLOR_GREEN
 #define C_OFF                          ST7789_COLOR_DARKGREY
@@ -512,6 +477,9 @@ typedef enum
     MENU_ITEM_OVP,
     MENU_ITEM_OCP,
     MENU_ITEM_OPP,
+    MENU_ITEM_SLEEP_TEMP,
+    MENU_ITEM_BUZZER,
+    MENU_ITEM_THEME,
     MENU_ITEM_COUNT
 } MenuItem_t;
 
@@ -531,8 +499,9 @@ static float solder_backup_vset = 12.0f;
 static float solder_backup_iset = 2.0f;
 static uint8_t solder_backup_enable = 0U;
 
-static GPIO_PinState solder_detect_last = GPIO_PIN_SET;
-static uint32_t solder_detect_tick = 0U;
+static GPIO_PinState sleep_raw_last = GPIO_PIN_SET;
+static GPIO_PinState sleep_stable = GPIO_PIN_SET;
+static uint32_t sleep_changed_tick = 0U;
 
 /*
  * PB9 is now short/long aware:
@@ -1437,48 +1406,22 @@ static void draw_number_set_field(uint8_t is_voltage)
  * GRAPH UI
  * ========================================================= */
 
-static void draw_line_fast(int x0,
-                           int y0,
-                           int x1,
-                           int y1,
-                           uint16_t color)
+static void draw_line_fast(int x0, int y0, int x1, int y1, uint16_t color)
 {
-    int dx = (x1 > x0) ? (x1 - x0) : (x0 - x1);
-    int sx = (x0 < x1) ? 1 : -1;
-
-    int dy = (y1 > y0) ? (y0 - y1) : (y1 - y0);
-    int sy = (y0 < y1) ? 1 : -1;
-
-    int err = dx + dy;
-
+    int dx=(x1>x0)?(x1-x0):(x0-x1), sx=(x0<x1)?1:-1;
+    int dy=(y1>y0)?(y0-y1):(y1-y0), sy=(y0<y1)?1:-1;
+    int err=dx+dy;
     while(1)
     {
-        if(x0 >= 0 && x0 < 320 &&
-           y0 >= 0 && y0 < 240)
+        if(x0>=0&&x0<320&&y0>=0&&y0<240)
         {
-            ST7789_DrawPixel(
-                (uint16_t)x0,
-                (uint16_t)y0,
-                color
-            );
+            ST7789_DrawPixel((uint16_t)x0,(uint16_t)y0,color);
+            if(y0+1<240) ST7789_DrawPixel((uint16_t)x0,(uint16_t)(y0+1),color);
         }
-
-        if(x0 == x1 && y0 == y1)
-            break;
-
-        int e2 = 2 * err;
-
-        if(e2 >= dy)
-        {
-            err += dy;
-            x0 += sx;
-        }
-
-        if(e2 <= dx)
-        {
-            err += dx;
-            y0 += sy;
-        }
+        if(x0==x1&&y0==y1) break;
+        int e2=2*err;
+        if(e2>=dy){err+=dy;x0+=sx;}
+        if(e2<=dx){err+=dx;y0+=sy;}
     }
 }
 
@@ -1705,128 +1648,34 @@ static const char *ui_mode_text(UIMode_t mode)
     return (mode == UI_MODE_GRAPH) ? "GRAPH" : "NUMBER";
 }
 
-static void draw_menu_row(uint8_t row,
-                          const char *name,
-                          const char *value)
+static const char *theme_text(UITheme_t t){return (t==UI_THEME_LIGHT)?"LIGHT":"DARK";}
+static const char *on_off_text(uint8_t on){return on?"ON":"OFF";}
+
+static void draw_menu_row(uint8_t row,const char *name,const char *value)
 {
-    uint16_t y =
-        (uint16_t)(58U + row * 37U);
-
-    uint8_t selected =
-        ((uint8_t)menu_item == row)
-        ? 1U
-        : 0U;
-
-    uint16_t fg =
-        selected ? C_BG : C_WHITE;
-
-    uint16_t bg =
-        selected ? C_VOLT : C_BG;
-
-    ST7789_DrawFilledRectangle(
-        20,
-        (uint16_t)(y - 5U),
-        280,
-        30,
-        bg
-    );
-
-    ST7789_PutString(
-        34,
-        y,
-        name,
-        2,
-        fg,
-        bg
-    );
-
-    ST7789_PutString(
-        156,
-        y,
-        value,
-        2,
-        fg,
-        bg
-    );
+    uint16_t y=(uint16_t)(40U+row*24U);
+    uint8_t sel=((uint8_t)menu_item==row)?1U:0U;
+    uint16_t fg=sel?C_BG:C_WHITE, bg=sel?C_VOLT:C_BG;
+    ST7789_DrawFilledRectangle(18,(uint16_t)(y-3U),284,20,bg);
+    ST7789_PutString(30,y,name,2,fg,bg);
+    ST7789_PutString(184,y,value,2,fg,bg);
 }
 
 static void draw_menu(void)
 {
     ST7789_FillScreen(C_BG);
-
-    ST7789_PutString(
-        100,
-        8,
-        "MENU",
-        3,
-        C_WHITE,
-        C_BG
-    );
-
-    ST7789_DrawFilledRectangle(
-        14,
-        42,
-        292,
-        1,
-        C_GRID
-    );
-
-    char b_ovp[20];
-    char b_ocp[20];
-    char b_opp[20];
-
-    snprintf(b_ovp, sizeof(b_ovp),
-             "%.1f V",
-             menu_ovp);
-
-    snprintf(b_ocp, sizeof(b_ocp),
-             "%.1f A",
-             menu_ocp);
-
-    snprintf(b_opp, sizeof(b_opp),
-             "%.0f W",
-             menu_opp);
-
-    draw_menu_row(
-        MENU_ITEM_UI,
-        "UI",
-        ui_mode_text(menu_ui_mode)
-    );
-
-    draw_menu_row(
-        MENU_ITEM_OVP,
-        "OVP",
-        b_ovp
-    );
-
-    draw_menu_row(
-        MENU_ITEM_OCP,
-        "OCP",
-        b_ocp
-    );
-
-    draw_menu_row(
-        MENU_ITEM_OPP,
-        "OPP",
-        b_opp
-    );
-
-    ST7789_DrawFilledRectangle(
-        10,
-        211,
-        300,
-        1,
-        C_GRID
-    );
-
-    ST7789_PutString(
-        10,
-        220,
-        "V:ITEM  I:VALUE  OUT:OK",
-        1,
-        C_MUTED,
-        C_BG
-    );
+    ST7789_PutString(124,6,"MENU",2,C_WHITE,C_BG);
+    ST7789_DrawFilledRectangle(12,29,296,1,C_GRID);
+    char a[20],b[20],c[20],d[20];
+    snprintf(a,sizeof(a),"%.1fV",menu_ovp); snprintf(b,sizeof(b),"%.1fA",menu_ocp);
+    snprintf(c,sizeof(c),"%.0fW",menu_opp); snprintf(d,sizeof(d),"%.0fC",menu_sleep_temp);
+    draw_menu_row(MENU_ITEM_UI,"UI",ui_mode_text(menu_ui_mode));
+    draw_menu_row(MENU_ITEM_OVP,"OVP",a); draw_menu_row(MENU_ITEM_OCP,"OCP",b);
+    draw_menu_row(MENU_ITEM_OPP,"OPP",c); draw_menu_row(MENU_ITEM_SLEEP_TEMP,"SLEEP",d);
+    draw_menu_row(MENU_ITEM_BUZZER,"BUZZER",on_off_text(menu_buzzer_button_enable));
+    draw_menu_row(MENU_ITEM_THEME,"THEME",theme_text(menu_theme));
+    ST7789_DrawFilledRectangle(10,210,300,1,C_GRID);
+    ST7789_PutString(10,220,"V:ITEM  I:VALUE  OUT:OK",1,C_MUTED,C_BG);
 }
 
 /* =========================================================
@@ -1874,6 +1723,9 @@ static void enter_menu(void)
     menu_ovp = protect_ovp;
     menu_ocp = protect_ocp;
     menu_opp = protect_opp;
+    menu_sleep_temp = sleep_temp;
+    menu_buzzer_button_enable = buzzer_button_enable;
+    menu_theme = ui_theme;
 
     menu_item = MENU_ITEM_UI;
 
@@ -1925,9 +1777,15 @@ static void enter_solder_mode(void)
                       GPIO_PIN_SET);
 #endif
 
+    UI_Solider_SetTheme((ui_theme == UI_THEME_LIGHT) ? 1U : 0U);
     UI_Solider_Enter();
 
     screen = SCREEN_SOLDER;
+
+    UI_Solider_SetSleep(
+        HAL_GPIO_ReadPin(SOLDER_SLEEP_PORT, SOLDER_SLEEP_PIN) == SOLDER_SLEEP_ACTIVE,
+        sleep_temp
+    );
 
     /*
      * Reset encoder accumulators so the first solder adjustment
@@ -1970,36 +1828,17 @@ static void exit_solder_mode(void)
     enter_live_mode(solder_return_ui_mode);
 }
 
-/*
- * PB11 falling-edge detector.
- *
- * HIGH -> LOW enters SOLDER.
- * LOW -> HIGH does nothing; leaving SOLDER is done by holding PB9 for 1 s.
- */
-static void solder_detect_task(void)
+/* PB11 holder/sleep detector. */
+static void solder_sleep_task(void)
 {
-    GPIO_PinState now =
-        HAL_GPIO_ReadPin(SOLDER_DETECT_PORT,
-                         SOLDER_DETECT_PIN);
-
-    uint32_t tick = HAL_GetTick();
-
-    if(solder_detect_last == GPIO_PIN_SET &&
-       now == GPIO_PIN_RESET)
-    {
-        /*
-         * Small edge lockout for switch/contact bounce.
-         */
-        if((uint32_t)(tick - solder_detect_tick) >= 100U)
-        {
-            solder_detect_tick = tick;
-
-            if(screen != SCREEN_SOLDER)
-                enter_solder_mode();
-        }
-    }
-
-    solder_detect_last = now;
+    GPIO_PinState raw=HAL_GPIO_ReadPin(SOLDER_SLEEP_PORT,SOLDER_SLEEP_PIN);
+    uint32_t now=HAL_GetTick();
+    if(raw!=sleep_raw_last){sleep_raw_last=raw;sleep_changed_tick=now;}
+    if((uint32_t)(now-sleep_changed_tick)<SOLDER_SLEEP_DEBOUNCE_MS) return;
+    if(raw==sleep_stable) return;
+    sleep_stable=raw;
+    if(screen!=SCREEN_SOLDER) return;
+    UI_Solider_SetSleep(sleep_stable==SOLDER_SLEEP_ACTIVE,sleep_temp);
 }
 
 /*
@@ -2095,6 +1934,7 @@ static void out_button_task(void)
                             ui->state = BBUI_STATE_CV;
 
                         status_dirty = 1U;
+                        buzzer_button_start();
                     }
                 }
                 else if(screen == SCREEN_MENU)
@@ -2105,16 +1945,11 @@ static void out_button_task(void)
                     protect_ovp = menu_ovp;
                     protect_ocp = menu_ocp;
                     protect_opp = menu_opp;
-
-                    /*
-                     * Persist menu settings as well.
-                     * Flash writer skips erase/write if nothing changed.
-                     */
-                    (void)ui_flash_save(
-                        ui->vset,
-                        ui->iset
-                    );
-
+                    sleep_temp = menu_sleep_temp;
+                    buzzer_button_enable = menu_buzzer_button_enable;
+                    ui_theme = menu_theme;
+                    UI_Solider_SetTheme((ui_theme == UI_THEME_LIGHT) ? 1U : 0U);
+                    (void)ui_flash_save(ui->vset,ui->iset);
                     enter_live_mode(menu_ui_mode);
                 }
             }
@@ -2587,15 +2422,21 @@ static void encoder_task(void)
                     }
                     else if(menu_item == MENU_ITEM_OPP)
                     {
-                        menu_opp +=
-                            (float)dir * PROTECT_OPP_STEP;
-
-                        menu_opp =
-                            clampf_ui(
-                                menu_opp,
-                                PROTECT_OPP_MIN,
-                                PROTECT_OPP_MAX
-                            );
+                        menu_opp += (float)dir * PROTECT_OPP_STEP;
+                        menu_opp = clampf_ui(menu_opp,PROTECT_OPP_MIN,PROTECT_OPP_MAX);
+                    }
+                    else if(menu_item == MENU_ITEM_SLEEP_TEMP)
+                    {
+                        menu_sleep_temp += (float)dir * SLEEP_TEMP_STEP;
+                        menu_sleep_temp = clampf_ui(menu_sleep_temp,SLEEP_TEMP_MIN,SLEEP_TEMP_MAX);
+                    }
+                    else if(menu_item == MENU_ITEM_BUZZER)
+                    {
+                        menu_buzzer_button_enable ^= 1U;
+                    }
+                    else if(menu_item == MENU_ITEM_THEME)
+                    {
+                        menu_theme = (menu_theme == UI_THEME_DARK) ? UI_THEME_LIGHT : UI_THEME_DARK;
                     }
 
                     draw_menu();
@@ -2665,6 +2506,52 @@ static void button_task(void)
         }
     }
 }
+
+/* =========================================================
+ * SOLDER BUZZER EVENTS
+ * ========================================================= */
+
+static void solder_buzzer_event_task(void)
+{
+    uint8_t events = UI_Solider_GetEvents();
+
+    if(events == UI_SOLDER_EVENT_NONE)
+        return;
+
+    /*
+     * BUZZER menu controls normal interaction/status beeps.
+     * Fault remains 3 beeps regardless of this setting.
+     */
+    if(!buzzer_button_enable)
+        return;
+
+    if(events &
+       (UI_SOLDER_EVENT_ENTER |
+        UI_SOLDER_EVENT_SLEEP_ENTER |
+        UI_SOLDER_EVENT_TARGET_REACHED))
+    {
+        buzzer_start(1U);
+    }
+}
+
+
+/* =========================================================
+ * STATUS LED PC13
+ * ========================================================= */
+
+static void status_led_write(uint8_t on)
+{
+    HAL_GPIO_WritePin(STATUS_LED_PORT,STATUS_LED_PIN,on?STATUS_LED_ACTIVE_STATE:STATUS_LED_IDLE_STATE);
+}
+
+static void status_led_task(void)
+{
+    uint8_t on=0U;
+    if(screen==SCREEN_SOLDER) on=UI_Solider_IsSleeping()?0U:1U;
+    else on=(ui!=NULL&&ui->enable!=0U&&ui->state!=BBUI_STATE_FAULT)?1U:0U;
+    status_led_write(on);
+}
+
 
 /* =========================================================
  * BLINK
@@ -2794,13 +2681,11 @@ void BBUI_Init(BBUI_Data_t *data,
 
     UI_Solider_Init();
 
-    solder_detect_last =
-        HAL_GPIO_ReadPin(
-            SOLDER_DETECT_PORT,
-            SOLDER_DETECT_PIN
-        );
-
-    solder_detect_tick = HAL_GetTick();
+    sleep_raw_last = HAL_GPIO_ReadPin(SOLDER_SLEEP_PORT,SOLDER_SLEEP_PIN);
+    sleep_stable = sleep_raw_last;
+    sleep_changed_tick = HAL_GetTick();
+    UI_Solider_SetTheme((ui_theme == UI_THEME_LIGHT) ? 1U : 0U);
+    status_led_write(0U);
 
 #if SOLDER_ROUTE_ENABLE
     /* Normal POWER route at startup. */
@@ -2834,9 +2719,8 @@ void BBUI_Init(BBUI_Data_t *data,
     runtime_ms_remainder = 0U;
     runtime_dirty = 1U;
 
-    //enter_live_mode(UI_MODE_NUMBER);
-		enter_solder_mode();
-		//HAL_GPIO_WritePin(GPIOB, GPIO_PIN_15, GPIO_PIN_SET);
+    if(BOOT_DEFAULT_SOLDER) enter_solder_mode();
+    else enter_live_mode(UI_MODE_NUMBER);
 }
 
 void BBUI_Task(void)
@@ -2845,10 +2729,8 @@ void BBUI_Task(void)
 
     filter_task();
 
-    /*
-     * PB11 HIGH -> LOW may enter SOLDER from NUMBER, GRAPH or MENU.
-     */
-    solder_detect_task();
+    /* PB11 holder sensor controls SOLDER sleep/wake. */
+    solder_sleep_task();
 
     encoder_task();
     button_task();
@@ -2864,6 +2746,9 @@ void BBUI_Task(void)
      * finalized ui->enable for this loop.
      */
     runtime_task();
+    solder_buzzer_event_task();
+
+    status_led_task();
 
     blink_task();
 

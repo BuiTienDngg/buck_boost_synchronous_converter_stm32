@@ -354,9 +354,9 @@ static float Read_NTC_Temp(void)
     raw = ADC_Read_Channel(&hadc2, ADC_CHANNEL_2);
     const float RFIX = 50000.0f;
 
-    const float R0   = 50000.0f;   // 50k @ 25°C
-    const float T0   = 298.15f;    // 25°C Kelvin
-    const float BETA = 3950.0f;    // ph?i dúng v?i NTC c?a b?n
+    const float R0   = 50000.0f;   // 50k @ 25ï¿½C
+    const float T0   = 298.15f;    // 25ï¿½C Kelvin
+    const float BETA = 3950.0f;    // ph?i dï¿½ng v?i NTC c?a b?n
 
     float v = ((float)raw / 4095.0f) * VREF;
 
@@ -476,7 +476,7 @@ static void PowerStage_SetRatio(float ratio)
             (uint32_t)(d_buck * (float)PWM_ARR);
 
         /*
-         * High-side BOOST luôn ON
+         * High-side BOOST luï¿½n ON
          */
         duty_boost = PWM_ARR;
 
@@ -514,7 +514,7 @@ static void PowerStage_SetRatio(float ratio)
             d_boost_hs = 1.0f;
 
         /*
-         * High-side BUCK luôn ON
+         * High-side BUCK luï¿½n ON
          */
         duty_buck = PWM_ARR;
 
@@ -985,14 +985,14 @@ void handle_temp(){
 			lastTime_readTemp = HAL_GetTick();
 			temp_new = Read_NTC_Temp();
 			PowerStage.temp = PowerStage.temp * 0.9f + temp_new * 0.1f;
-			if(PowerStage.temp >= 40.0f)
-			{
-				HAL_GPIO_WritePin(GPIOC, GPIO_PIN_15, 1);
-			}
-			else if(PowerStage.temp < 38.0f)
-			{
-				HAL_GPIO_WritePin(GPIOC, GPIO_PIN_15, 0);
-			}
+//			if(PowerStage.temp >= 40.0f)
+//			{
+//				HAL_GPIO_WritePin(GPIOC, GPIO_PIN_15, 1);
+//			}
+//			else if(PowerStage.temp < 38.0f)
+//			{
+//				HAL_GPIO_WritePin(GPIOC, GPIO_PIN_15, 0);
+//			}
 		}
 		
 }
@@ -1044,6 +1044,7 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
         }
     }
 }
+int sleep = 0;
 /* USER CODE END 0 */
 
 /**
@@ -1120,8 +1121,9 @@ int main(void)
      *  TIM4 encoder -> ISET
      *  PB9          -> Output ON/OFF
      */
+		
+		
     BBUI_Task();
-		HAL_GPIO_WritePin(GPIOB, GPIO_PIN_15, GPIO_PIN_SET);
 //		TIM3 -> CCR2 = 500;
     /* Slow NTC / fan handling */
     handle_temp();
@@ -1320,7 +1322,7 @@ static void MX_SPI1_Init(void)
   hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi1.Init.NSS = SPI_NSS_SOFT;
-  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_4;
   hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
@@ -1382,7 +1384,7 @@ static void MX_TIM1_Init(void)
     Error_Handler();
   }
   sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = 25;
+  sConfigOC.Pulse = 0;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
@@ -1614,8 +1616,7 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_10|GPIO_PIN_11
-                          |GPIO_PIN_15, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_10|GPIO_PIN_15, GPIO_PIN_RESET);
 
   /*Configure GPIO pins : PC13 PC14 PC15 */
   GPIO_InitStruct.Pin = GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15;
@@ -1624,13 +1625,17 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PB0 PB1 PB10 PB11
-                           PB15 */
-  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_10|GPIO_PIN_11
-                          |GPIO_PIN_15;
+  /*Configure GPIO pins : PB0 PB1 PB10 PB15 */
+  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_10|GPIO_PIN_15;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PB11 */
+  GPIO_InitStruct.Pin = GPIO_PIN_11;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /*Configure GPIO pins : PB12 PB4 PB8 PB9 */

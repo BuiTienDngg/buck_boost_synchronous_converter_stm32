@@ -9,8 +9,8 @@
  * SOLDER RANGE / DISPLAY
  * ========================================================= */
 
-#define SOL_TEMP_MIN                  150.0f
-#define SOL_TEMP_MAX                  450.0f
+#define SOL_TEMP_MIN                    0.0f
+#define SOL_TEMP_MAX                  500.0f
 
 #define SOL_CURR_MIN                  0.0f
 #define SOL_CURR_MAX                  10.0f
@@ -19,17 +19,28 @@
 #define SOL_SET_MAX                   450.0f
 #define SOL_SET_STEP                  5.0f
 
-#define SOL_SAMPLE_MS                 100U
-#define SOL_LCD_MS                    120U
+#define SOL_LCD_MS                    100U
 
-#define SOL_BG                        ST7789_COLOR_BLACK
+
+/*
+ * Buzzer target detection:
+ * target must remain within +/-5 C for 800 ms.
+ * A new target beep is re-armed after moving >=15 C away.
+ */
+#define TARGET_BEEP_BAND_C               5.0f
+#define TARGET_BEEP_HOLD_MS              800U
+#define TARGET_BEEP_REARM_C              15.0f
+
+static uint8_t sol_theme_light = 0U;
+
+#define SOL_BG                        (sol_theme_light ? ST7789_COLOR_WHITE : ST7789_COLOR_BLACK)
 #define SOL_TEMP_COLOR                ST7789_COLOR_RED
-#define SOL_CURR_COLOR                ST7789_COLOR_CYAN
-#define SOL_SET_COLOR                 ST7789_COLOR_CYAN
-#define SOL_TEXT_COLOR                ST7789_COLOR_WHITE
-#define SOL_MUTED_COLOR               ST7789_COLOR_LIGHTGREY
+#define SOL_CURR_COLOR                (sol_theme_light ? ST7789_COLOR_BLUE : ST7789_COLOR_CYAN)
+#define SOL_SET_COLOR                 (sol_theme_light ? ST7789_COLOR_BLUE : ST7789_COLOR_CYAN)
+#define SOL_TEXT_COLOR                (sol_theme_light ? ST7789_COLOR_BLACK : ST7789_COLOR_WHITE)
+#define SOL_MUTED_COLOR               (sol_theme_light ? ST7789_Color_GetFromRGB(75, 75, 75) : ST7789_COLOR_LIGHTGREY)
 #define SOL_PWR_COLOR                 ST7789_Color_GetFromRGB(255, 0, 255)
-#define SOL_GRID_COLOR                ST7789_Color_GetFromRGB(42, 48, 60)
+#define SOL_GRID_COLOR                (sol_theme_light ? ST7789_Color_GetFromRGB(205, 205, 205) : ST7789_Color_GetFromRGB(42, 48, 60))
 
 /* =========================================================
  * GRAPH - landscape 320 x 240
@@ -61,14 +72,25 @@
 
 #define SOLIDER_ADC_INDEX               2
 
-#define SOLIDER_PID_PERIOD_MS           100U
-#define SOLIDER_OFF_READ_DELAY_MS       50U
-#define SOLIDER_ADC_AVG_N               20U
+#define SOLIDER_PID_PERIOD_MS            50U
+#define SOLIDER_OFF_READ_DELAY_MS        8U
+#define SOLIDER_ADC_AVG_N                8U
 
-#define ALPHA_FIR                       0.5f
+#define ALPHA_FIR                       0.25f
 
-#define SOLIDER_CCR_MAX_POWER           300U
-#define SOLIDER_CCR_OFF                 999U
+/*
+ * Heater PWM range.
+ *
+ * IMPORTANT:
+ * With an inverted/PWM2 style heater drive and ARR ~= 1000:
+ *   CCR = 1000 -> OFF
+ *   CCR = 200  -> about 80% maximum effective duty
+ *
+ * Therefore this value intentionally limits maximum heater power.
+ * Set closer to 0 only after checking TIM3 CH2 polarity and heater current.
+ */
+#define SOLIDER_CCR_MAX_POWER           200U
+#define SOLIDER_CCR_OFF                 1000U
 
 /* =========================================================
  * HEATER PWM
@@ -81,10 +103,9 @@
  * ========================================================= */
 #define SOLIDER_PWM_CCR                 (TIM3->CCR2)
 
-#define SOLIDER_PID_DT                  0.5f
 
-#define SOLIDER_KP                      0.10f
-#define SOLIDER_KI                      0.05f
+#define SOLIDER_KP                      0.05f
+#define SOLIDER_KI                      0.1f
 #define SOLIDER_KD                      0.000f
 
 #define SOLIDER_TEMP_MIN_C              25.0f
@@ -108,6 +129,7 @@ static SoliderPID_State_t solider_pid_state = SOLIDER_PID_IDLE;
 
 static uint32_t solider_pid_tick = 0U;
 static uint32_t solider_off_tick = 0U;
+static uint32_t solider_pid_compute_tick = 0U;
 
 static uint32_t solider_adc_sum = 0U;
 static uint16_t solider_adc_count = 0U;
@@ -146,6 +168,14 @@ static float Solider_PID_Compute(float set_temp_, float measured_temp_);
 static UI_Solider_Data_t sol;
 
 static uint8_t sol_active = 0U;
+static uint8_t sol_sleep = 0U;
+static float sol_sleep_temp = 200.0f;
+
+static uint8_t sol_event_flags = 0U;
+
+static uint8_t target_beep_armed = 1U;
+static uint8_t target_beep_in_band = 0U;
+static uint32_t target_beep_tick = 0U;
 static uint8_t force_redraw = 1U;
 static uint8_t values_dirty = 1U;
 
@@ -155,7 +185,7 @@ static int16_t graph_last_yt = -1;
 static int16_t graph_last_yi = -1;
 static uint8_t graph_has_last = 0U;
 
-static uint32_t sample_tick = 0U;
+static uint8_t graph_new_sample = 0U;
 static uint32_t lcd_tick = 0U;
 
 /* caches */
@@ -166,6 +196,8 @@ static char c_current[16] = "";
 static char c_preset0[8] = "";
 static char c_preset1[8] = "";
 static char c_preset2[8] = "";
+static char c_sleep_tip[16] = "";
+static char c_sleep_set[16] = "";
 
 static uint8_t old_active_preset = 0xFFU;
 
@@ -190,6 +222,8 @@ static void clear_caches(void)
     c_preset0[0] = '\0';
     c_preset1[0] = '\0';
     c_preset2[0] = '\0';
+    c_sleep_tip[0] = '\0';
+    c_sleep_set[0] = '\0';
 
     old_active_preset = 0xFFU;
 }
@@ -209,46 +243,13 @@ static void draw_rect_outline(uint16_t x,
     ST7789_DrawFilledRectangle((uint16_t)(x + w - 1U), y, 1U, h, color);
 }
 
-static void draw_line_fast(int x0,
-                           int y0,
-                           int x1,
-                           int y1,
-                           uint16_t color)
+static void draw_line_fast(int x0,int y0,int x1,int y1,uint16_t color)
 {
-    int dx = (x1 > x0) ? (x1 - x0) : (x0 - x1);
-    int sx = (x0 < x1) ? 1 : -1;
-
-    int dy = (y1 > y0) ? (y0 - y1) : (y1 - y0);
-    int sy = (y0 < y1) ? 1 : -1;
-
-    int err = dx + dy;
-
-    while(1)
-    {
-        if(x0 >= 0 && x0 < 320 &&
-           y0 >= 0 && y0 < 240)
-        {
-            ST7789_DrawPixel((uint16_t)x0,
-                             (uint16_t)y0,
-                             color);
-        }
-
-        if(x0 == x1 && y0 == y1)
-            break;
-
-        int e2 = 2 * err;
-
-        if(e2 >= dy)
-        {
-            err += dy;
-            x0 += sx;
-        }
-
-        if(e2 <= dx)
-        {
-            err += dx;
-            y0 += sy;
-        }
+    int dx=(x1>x0)?x1-x0:x0-x1,sx=(x0<x1)?1:-1;
+    int dy=(y1>y0)?y0-y1:y1-y0,sy=(y0<y1)?1:-1; int err=dx+dy;
+    while(1){
+        if(x0>=0&&x0<320&&y0>=0&&y0<240){ST7789_DrawPixel((uint16_t)x0,(uint16_t)y0,color);if(y0+1<240)ST7789_DrawPixel((uint16_t)x0,(uint16_t)(y0+1),color);}
+        if(x0==x1&&y0==y1)break; int e2=2*err; if(e2>=dy){err+=dy;x0+=sx;} if(e2<=dx){err+=dx;y0+=sy;}
     }
 }
 
@@ -346,7 +347,7 @@ static void draw_graph_static(void)
 {
     /* legend */
     ST7789_PutString(7, 3,
-                     "T 150-450C",
+                     "T 0-500C",
                      1,
                      SOL_TEMP_COLOR,
                      SOL_BG);
@@ -391,7 +392,6 @@ static void draw_graph_static(void)
     graph_last_yi = -1;
     graph_has_last = 0U;
 
-    sample_tick = HAL_GetTick();
 }
 
 static void graph_push(float temp, float current)
@@ -453,12 +453,15 @@ static void graph_push(float temp, float current)
 
 static void graph_task(void)
 {
-    uint32_t now = HAL_GetTick();
-
-    if((uint32_t)(now - sample_tick) < SOL_SAMPLE_MS)
+    /*
+     * Draw exactly one graph point for each new temperature sample.
+     * This keeps the graph synchronized with the real solder ADC/PID
+     * update instead of running on a separate timer.
+     */
+    if(graph_new_sample == 0U)
         return;
 
-    sample_tick = now;
+    graph_new_sample = 0U;
 
     graph_push(sol.tip_temp,
                sol.current);
@@ -645,6 +648,92 @@ static void update_values(uint8_t force)
 }
 
 /* =========================================================
+ * SOLDER EVENT / TARGET BEEP
+ * ========================================================= */
+
+static void solder_event_set(uint8_t event_bit)
+{
+    sol_event_flags |= event_bit;
+}
+
+static void target_beep_reset(void)
+{
+    target_beep_armed = 1U;
+    target_beep_in_band = 0U;
+    target_beep_tick = HAL_GetTick();
+}
+
+static void target_beep_task(void)
+{
+    if(!sol_active)
+        return;
+
+    float target = UI_Solider_GetSetTemp();
+    float err = sol.tip_temp - target;
+
+    if(err < 0.0f)
+        err = -err;
+
+    if(err >= TARGET_BEEP_REARM_C)
+    {
+        target_beep_armed = 1U;
+        target_beep_in_band = 0U;
+        return;
+    }
+
+    if(!target_beep_armed)
+        return;
+
+    if(err <= TARGET_BEEP_BAND_C)
+    {
+        uint32_t now = HAL_GetTick();
+
+        if(!target_beep_in_band)
+        {
+            target_beep_in_band = 1U;
+            target_beep_tick = now;
+            return;
+        }
+
+        if((uint32_t)(now - target_beep_tick) >= TARGET_BEEP_HOLD_MS)
+        {
+            target_beep_armed = 0U;
+            target_beep_in_band = 0U;
+            solder_event_set(UI_SOLDER_EVENT_TARGET_REACHED);
+        }
+    }
+    else
+    {
+        target_beep_in_band = 0U;
+    }
+}
+
+
+/* =========================================================
+ * SLEEP UI
+ * ========================================================= */
+static void draw_sleep_base(void)
+{
+    ST7789_FillScreen(SOL_BG);
+    ST7789_PutString(124,10,"SOLDER",2,SOL_MUTED_COLOR,SOL_BG);
+    ST7789_PutString(84,45,"SLEEP",5,SOL_SET_COLOR,SOL_BG);
+    ST7789_DrawFilledRectangle(30,102,260,1,SOL_GRID_COLOR);
+    ST7789_PutString(42,122,"TIP",2,SOL_TEMP_COLOR,SOL_BG);
+    ST7789_PutString(184,122,"SLEEP SET",1,SOL_SET_COLOR,SOL_BG);
+    ST7789_PutString(54,196,"PB11 LOW - IRON IN HOLDER",1,SOL_MUTED_COLOR,SOL_BG);
+    c_sleep_tip[0]='\0'; c_sleep_set[0]='\0';
+}
+
+static void update_sleep_values(uint8_t force)
+{
+    char b[16]; if(force){c_sleep_tip[0]='\0';c_sleep_set[0]='\0';}
+    snprintf(b,sizeof(b),"%03uC",(unsigned)clampf_sol(sol.tip_temp,0.0f,999.0f));
+    draw_text_diff(34,146,3,SOL_TEMP_COLOR,b,c_sleep_tip,sizeof(c_sleep_tip));
+    snprintf(b,sizeof(b),"%03uC",(unsigned)clampf_sol(sol_sleep_temp,0.0f,999.0f));
+    draw_text_diff(182,146,3,SOL_SET_COLOR,b,c_sleep_set,sizeof(c_sleep_set));
+}
+
+/* =========================================================
  * PUBLIC API
  * ========================================================= */
 
@@ -665,13 +754,20 @@ void UI_Solider_Init(void)
     sol.set_temp = sol.preset[1];
 
     sol_active = 0U;
+    sol_sleep = 0U;
+    sol_sleep_temp = 200.0f;
+
+    sol_event_flags = 0U;
+    target_beep_armed = 1U;
+    target_beep_in_band = 0U;
+    target_beep_tick = HAL_GetTick();
     force_redraw = 1U;
     values_dirty = 1U;
 
     graph_head = 0U;
     graph_has_last = 0U;
+    graph_new_sample = 0U;
 
-    sample_tick = HAL_GetTick();
     lcd_tick = HAL_GetTick();
 
     clear_caches();
@@ -680,14 +776,18 @@ void UI_Solider_Init(void)
 void UI_Solider_Enter(void)
 {
     sol_active = 1U;
+    sol_sleep = 0U;
+
+    target_beep_reset();
+    solder_event_set(UI_SOLDER_EVENT_ENTER);
     force_redraw = 1U;
     values_dirty = 1U;
 
     graph_head = 0U;
     graph_has_last = 0U;
     graph_last_x = -1;
+    graph_new_sample = 0U;
 
-    sample_tick = HAL_GetTick();
     lcd_tick = HAL_GetTick();
 
     clear_caches();
@@ -699,14 +799,85 @@ void UI_Solider_Enter(void)
 void UI_Solider_Exit(void)
 {
     sol_active = 0U;
-
-    /* Always turn the heater OFF when leaving SOLDER mode. */
+    sol_sleep = 0U;
     Solider_PID_Enable(0U);
 }
 
 uint8_t UI_Solider_IsActive(void)
 {
     return sol_active;
+}
+
+uint8_t UI_Solider_IsSleeping(void)
+{
+    return sol_sleep;
+}
+
+uint8_t UI_Solider_GetEvents(void)
+{
+    uint8_t events = sol_event_flags;
+    sol_event_flags = 0U;
+    return events;
+}
+
+void UI_Solider_SetTheme(uint8_t light)
+{
+    uint8_t n=light?1U:0U;
+    if(sol_theme_light!=n){sol_theme_light=n;force_redraw=1U;values_dirty=1U;clear_caches();}
+}
+
+void UI_Solider_SetSleep(uint8_t sleep,
+                         float sleep_temp)
+{
+    sol_sleep_temp =
+        clampf_sol(
+            sleep_temp,
+            100.0f,
+            350.0f
+        );
+
+    uint8_t new_sleep =
+        sleep ? 1U : 0U;
+
+    if(sol_sleep != new_sleep)
+    {
+        sol_sleep = new_sleep;
+
+        /*
+         * New target after entering/leaving sleep.
+         * Re-arm the target reached beep.
+         */
+        target_beep_reset();
+
+        if(sol_sleep)
+        {
+            /*
+             * Iron placed in holder -> beep once immediately.
+             */
+            solder_event_set(
+                UI_SOLDER_EVENT_SLEEP_ENTER
+            );
+        }
+
+        /*
+         * Reset PID internal state for the target step.
+         */
+        Solider_PID_Reset();
+
+        if(sol_active)
+        {
+            solider_pid_tick = HAL_GetTick();
+            solider_pid_state = SOLIDER_PID_RUN;
+        }
+
+        force_redraw = 1U;
+        values_dirty = 1U;
+        clear_caches();
+    }
+    else if(sol_sleep)
+    {
+        values_dirty = 1U;
+    }
 }
 
 void UI_Solider_SetData(float tip_temp,
@@ -720,11 +891,12 @@ void UI_Solider_SetData(float tip_temp,
     sol.power = power;
 
     values_dirty = 1U;
+    graph_new_sample = 1U;
 }
 
 float UI_Solider_GetSetTemp(void)
 {
-    return sol.set_temp;
+    return sol_sleep ? sol_sleep_temp : sol.set_temp;
 }
 
 void UI_Solider_SetPreset(uint8_t id,
@@ -747,6 +919,7 @@ void UI_Solider_SetPreset(uint8_t id,
 
 void UI_Solider_SelectPreset(uint8_t id)
 {
+    if(sol_sleep) return;
     if(id > 2U)
         return;
 
@@ -758,6 +931,7 @@ void UI_Solider_SelectPreset(uint8_t id)
 
 void UI_Solider_EncoderAdjust(int8_t dir)
 {
+    if(sol_sleep) return;
     if(dir == 0)
         return;
 
@@ -785,33 +959,79 @@ void UI_Solider_Task(uint8_t force)
         return;
 
     /*
-     * Self-contained control: the PID state machine runs whenever
-     * SOLDER screen is active. Do not call Solider_PID_Task() a
-     * second time elsewhere in the main loop.
+     * Control loop remains fast and completely independent
+     * from the LCD refresh rate.
      */
     Solider_PID_Task(0.0f);
 
-    if(force || force_redraw)
-    {
-        force_redraw = 0U;
-        values_dirty = 0U;
-
-        draw_base();
-        update_values(1U);
-
-        return;
-    }
-
-    graph_task();
+    /*
+     * Target-reached detection runs independently of LCD refresh.
+     */
+    target_beep_task();
 
     uint32_t now = HAL_GetTick();
 
-    if(values_dirty ||
-       (uint32_t)(now - lcd_tick) >= SOL_LCD_MS)
+    /*
+     * Force redraw is the only case allowed to redraw immediately.
+     * Normal sensor/PID updates only set values_dirty/graph_new_sample
+     * and wait for SOL_LCD_MS.
+     */
+    if(force || force_redraw)
     {
-        lcd_tick = now;
-        values_dirty = 0U;
+        force_redraw = 0U;
 
+        if(sol_sleep)
+        {
+            draw_sleep_base();
+            update_sleep_values(1U);
+        }
+        else
+        {
+            draw_base();
+            update_values(1U);
+        }
+
+        values_dirty = 0U;
+        graph_new_sample = 0U;
+        lcd_tick = now;
+        return;
+    }
+
+    /*
+     * Do not touch the ST7789 until the LCD period has elapsed.
+     * PID/ADC can update many times between two LCD frames.
+     */
+    if((uint32_t)(now - lcd_tick) < SOL_LCD_MS)
+        return;
+
+    lcd_tick = now;
+
+    if(sol_sleep)
+    {
+        if(values_dirty)
+        {
+            values_dirty = 0U;
+            update_sleep_values(0U);
+        }
+
+        /*
+         * No graph is drawn in SLEEP mode.
+         * Discard pending graph sample so it does not appear on wake.
+         */
+        graph_new_sample = 0U;
+        return;
+    }
+
+    /*
+     * Graph is also rate-limited by SOL_LCD_MS.
+     * If several PID samples arrived during one LCD period,
+     * graph_task() plots only the most recent value.
+     */
+    graph_task();
+
+    if(values_dirty)
+    {
+        values_dirty = 0U;
         update_values(0U);
     }
 }
@@ -833,7 +1053,8 @@ static float clampf_solider(float x, float min, float max)
 float Solider_ADC_ToTemp(uint16_t adc_raw)
 {
     float temp =
-        ((float)adc_raw - 1200.0f) * 1.2f;
+        ((float)adc_raw - 1200.0f) * 1.3f;
+
     temp = clampf_solider(
         temp,
         SOLIDER_TEMP_MIN_C,
@@ -877,6 +1098,7 @@ static void Solider_PID_Reset(void)
 {
     solider_pid_i = 0.0f;
     solider_pid_prev_err = 0.0f;
+    solider_pid_compute_tick = 0U;
 
     solider_adc_sum = 0U;
     solider_adc_count = 0U;
@@ -916,22 +1138,51 @@ void Solider_PID_Enable(uint8_t enable)
 static float Solider_PID_Compute(float set_temp_,
                                  float measured_temp_)
 {
+    uint32_t now = HAL_GetTick();
+
+    /*
+     * Use the real interval between valid temperature samples.
+     * With the faster loop this is typically around 60 ms, but
+     * ADC scheduling can make it vary slightly.
+     */
+    float dt = 0.060f;
+
+    if(solider_pid_compute_tick != 0U)
+    {
+        dt =
+            (float)(now - solider_pid_compute_tick) /
+            1000.0f;
+    }
+
+    solider_pid_compute_tick = now;
+
+    /*
+     * Clamp dt so a pause/debug breakpoint cannot create a huge
+     * integral or derivative kick.
+     */
+    if(dt < 0.020f)
+        dt = 0.020f;
+
+    if(dt > 0.200f)
+        dt = 0.200f;
+
     float err = set_temp_ - measured_temp_;
 
-    float p = SOLIDER_KP * err;
+    float p =
+        SOLIDER_KP * err;
 
     float d =
         SOLIDER_KD *
         (err - solider_pid_prev_err) /
-        SOLIDER_PID_DT;
+        dt;
 
     float i_new =
         solider_pid_i +
-        SOLIDER_KI * err * SOLIDER_PID_DT;
+        SOLIDER_KI * err * dt;
 
-    float out_unsat = p + i_new + d;
+    float out_unsat =
+        p + i_new + d;
 
-    /* Same anti-windup logic as the working firmware. */
     if(!((out_unsat > 1.0f && err > 0.0f) ||
          (out_unsat < 0.0f && err < 0.0f)))
     {
@@ -939,13 +1190,21 @@ static float Solider_PID_Compute(float set_temp_,
     }
 
     solider_pid_i =
-        clampf_solider(solider_pid_i, -0.5f, 1.0f);
+        clampf_solider(
+            solider_pid_i,
+            -0.5f,
+            1.0f
+        );
 
     float out =
         p + solider_pid_i + d;
 
     out =
-        clampf_solider(out, 0.0f, 1.0f);
+        clampf_solider(
+            out,
+            0.0f,
+            1.0f
+        );
 
     solider_pid_prev_err = err;
 
@@ -958,13 +1217,13 @@ static float Solider_PID_Compute(float set_temp_,
  * RUN:
  *   - heater active according to previous PID output
  *   - accumulate current samples
- *   - every 100 ms turn heater OFF
+ *   - every 50 ms turn heater OFF
  *
  * OFF_WAIT:
- *   - wait 50 ms for switching noise to settle
+ *   - wait 8 ms for switching noise to settle
  *
  * READ_ADC:
- *   - average 20 ADC samples
+ *   - average 8 ADC samples
  *   - convert to temperature
  *   - FIR filter
  *   - PID compute
@@ -1081,6 +1340,11 @@ void Solider_PID_Task(float set_adc)
                     measured_temp =
                         Solider_ADC_ToTemp(adc_avg);
 
+                    /*
+                     * EMA smoothing:
+                     * alpha = 0.25 keeps the graph stable while the
+                     * faster sampling loop remains responsive.
+                     */
                     measured_temp =
                         measured_temp * ALPHA_FIR +
                         frev_measured_temp *

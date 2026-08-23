@@ -67,7 +67,7 @@
 
 #define ALPHA_FIR                       0.5f
 
-#define SOLIDER_CCR_MAX_POWER           500U
+#define SOLIDER_CCR_MAX_POWER           300U
 #define SOLIDER_CCR_OFF                 999U
 
 /* =========================================================
@@ -833,7 +833,7 @@ static float clampf_solider(float x, float min, float max)
 float Solider_ADC_ToTemp(uint16_t adc_raw)
 {
     float temp =
-        ((float)adc_raw - 1200.0f);
+        ((float)adc_raw - 1200.0f) * 1.2f;
     temp = clampf_solider(
         temp,
         SOLIDER_TEMP_MIN_C,

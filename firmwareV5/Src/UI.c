@@ -2834,7 +2834,9 @@ void BBUI_Init(BBUI_Data_t *data,
     runtime_ms_remainder = 0U;
     runtime_dirty = 1U;
 
-    enter_live_mode(UI_MODE_NUMBER);
+    //enter_live_mode(UI_MODE_NUMBER);
+		enter_solder_mode();
+		//HAL_GPIO_WritePin(GPIOB, GPIO_PIN_15, GPIO_PIN_SET);
 }
 
 void BBUI_Task(void)

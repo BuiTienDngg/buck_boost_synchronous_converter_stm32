@@ -89,16 +89,16 @@ static void MX_TIM4_Init(void);
 #define NTC_BETA            3950.0f
 #define NTC_T0_K            298.15f
 
-#define SET_V_MIN           2.0f
+#define SET_V_MIN           1.0f
 #define SET_V_MAX           36.0f
 #define SET_V_STEP          0.1f
 
 #define ENC_COUNT_PER_STEP  4
 
-#define POWERSTAGE_DUTY_MIN       0.1f
-#define POWERSTAGE_DUTY_MAX       0.9f
-#define POWERSTAGE_RATIO_MIN    0.1f
-#define POWERSTAGE_RATIO_MAX    0.9f
+#define POWERSTAGE_DUTY_MIN       0.01f
+#define POWERSTAGE_DUTY_MAX       0.99f
+#define POWERSTAGE_RATIO_MIN    0.01f
+#define POWERSTAGE_RATIO_MAX    0.99f
 
 #define CURRENT_MAX 	10.0f		// AMPE
 #define TEMP_MAX 			80.0f   //*C
@@ -119,11 +119,11 @@ static void MX_TIM4_Init(void);
 #define RATIO_MIN            POWERSTAGE_DUTY_MIN
 #define RATIO_MAX            POWERSTAGE_DUTY_MAX
 
-#define CV_KP                0.015f
-#define CV_KI                0.8f
+#define CV_KP                0.01f
+#define CV_KI                0.9f
 
-#define CC_KP                0.025f
-#define CC_KI                1.2f
+#define CC_KP                0.01f
+#define CC_KI                1.3f
 
 #define CV_I_MIN            -0.30f
 #define CV_I_MAX             0.30f
@@ -1214,7 +1214,7 @@ static void MX_ADC1_Init(void)
   */
   sConfig.Channel = ADC_CHANNEL_0;
   sConfig.Rank = ADC_REGULAR_RANK_1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_71CYCLES_5;
+  sConfig.SamplingTime = ADC_SAMPLETIME_239CYCLES_5;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
     Error_Handler();
@@ -1358,7 +1358,7 @@ static void MX_TIM1_Init(void)
 
   /* USER CODE END TIM1_Init 1 */
   htim1.Instance = TIM1;
-  htim1.Init.Prescaler = 4;
+  htim1.Init.Prescaler = 5;
   htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim1.Init.Period = 1000;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
@@ -1487,7 +1487,7 @@ static void MX_TIM3_Init(void)
 
   /* USER CODE END TIM3_Init 1 */
   htim3.Instance = TIM3;
-  htim3.Init.Prescaler = 10;
+  htim3.Init.Prescaler = 71;
   htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim3.Init.Period = 1000;
   htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;

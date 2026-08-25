@@ -1,3 +1,23 @@
+/*
+ * UI_Solider.c
+ *
+ * ST7789 320x240 soldering station UI + non-blocking heater control.
+ *
+ * Features:
+ *   - TIM3 CH2 heater PWM
+ *   - PID/ADC loop independent from LCD refresh
+ *   - LCD update by SOL_LCD_MS
+ *   - SLEEP mode through UI_Solider_SetSleep()
+ *   - buzzer events: enter SOLDER, enter SLEEP, target reached
+ *   - graph:
+ *       temperature : 0..500 C
+ *       current     : 0..10 A
+ *       BB Vout     : 0..30 V
+ *   - graph thickness: 2 pixels
+ *   - temporary temperature conversion:
+ *       temp = (adc_raw - 1200) * 1.3
+ */
+
 #include "UI_Solider.h"
 #include "st7789.h"
 #include "UI.h"
@@ -15,11 +35,14 @@
 #define SOL_CURR_MIN                  0.0f
 #define SOL_CURR_MAX                  10.0f
 
+#define SOL_VOUT_MIN                  0.0f
+#define SOL_VOUT_MAX                  30.0f
+
 #define SOL_SET_MIN                   150.0f
 #define SOL_SET_MAX                   450.0f
 #define SOL_SET_STEP                  5.0f
 
-#define SOL_LCD_MS                    100U
+#define SOL_LCD_MS                    150U
 
 
 /*
@@ -36,6 +59,7 @@ static uint8_t sol_theme_light = 0U;
 #define SOL_BG                        (sol_theme_light ? ST7789_COLOR_WHITE : ST7789_COLOR_BLACK)
 #define SOL_TEMP_COLOR                ST7789_COLOR_RED
 #define SOL_CURR_COLOR                (sol_theme_light ? ST7789_COLOR_BLUE : ST7789_COLOR_CYAN)
+#define SOL_VOUT_COLOR                ST7789_COLOR_GREEN
 #define SOL_SET_COLOR                 (sol_theme_light ? ST7789_COLOR_BLUE : ST7789_COLOR_CYAN)
 #define SOL_TEXT_COLOR                (sol_theme_light ? ST7789_COLOR_BLACK : ST7789_COLOR_WHITE)
 #define SOL_MUTED_COLOR               (sol_theme_light ? ST7789_Color_GetFromRGB(75, 75, 75) : ST7789_COLOR_LIGHTGREY)
@@ -72,7 +96,7 @@ static uint8_t sol_theme_light = 0U;
 
 #define SOLIDER_ADC_INDEX               2
 
-#define SOLIDER_PID_PERIOD_MS            50U
+#define SOLIDER_PID_PERIOD_MS            40U
 #define SOLIDER_OFF_READ_DELAY_MS        8U
 #define SOLIDER_ADC_AVG_N                8U
 
@@ -89,7 +113,7 @@ static uint8_t sol_theme_light = 0U;
  * Therefore this value intentionally limits maximum heater power.
  * Set closer to 0 only after checking TIM3 CH2 polarity and heater current.
  */
-#define SOLIDER_CCR_MAX_POWER           200U
+#define SOLIDER_CCR_MAX_POWER           0U
 #define SOLIDER_CCR_OFF                 1000U
 
 /* =========================================================
@@ -105,7 +129,7 @@ static uint8_t sol_theme_light = 0U;
 
 
 #define SOLIDER_KP                      0.05f
-#define SOLIDER_KI                      0.1f
+#define SOLIDER_KI                      0.05f
 #define SOLIDER_KD                      0.000f
 
 #define SOLIDER_TEMP_MIN_C              25.0f
@@ -183,6 +207,7 @@ static uint16_t graph_head = 0U;
 static int16_t graph_last_x = -1;
 static int16_t graph_last_yt = -1;
 static int16_t graph_last_yi = -1;
+static int16_t graph_last_yv = -1;
 static uint8_t graph_has_last = 0U;
 
 static uint8_t graph_new_sample = 0U;
@@ -207,8 +232,12 @@ static uint8_t old_active_preset = 0xFFU;
 
 static float clampf_sol(float x, float lo, float hi)
 {
-    if(x < lo) return lo;
-    if(x > hi) return hi;
+    if(x < lo)
+        return lo;
+
+    if(x > hi)
+        return hi;
+
     return x;
 }
 
@@ -243,13 +272,66 @@ static void draw_rect_outline(uint16_t x,
     ST7789_DrawFilledRectangle((uint16_t)(x + w - 1U), y, 1U, h, color);
 }
 
-static void draw_line_fast(int x0,int y0,int x1,int y1,uint16_t color)
+static void draw_line_fast(int x0,
+                           int y0,
+                           int x1,
+                           int y1,
+                           uint16_t color)
 {
-    int dx=(x1>x0)?x1-x0:x0-x1,sx=(x0<x1)?1:-1;
-    int dy=(y1>y0)?y0-y1:y1-y0,sy=(y0<y1)?1:-1; int err=dx+dy;
-    while(1){
-        if(x0>=0&&x0<320&&y0>=0&&y0<240){ST7789_DrawPixel((uint16_t)x0,(uint16_t)y0,color);if(y0+1<240)ST7789_DrawPixel((uint16_t)x0,(uint16_t)(y0+1),color);}
-        if(x0==x1&&y0==y1)break; int e2=2*err; if(e2>=dy){err+=dy;x0+=sx;} if(e2<=dx){err+=dx;y0+=sy;}
+    int dx =
+        (x1 > x0) ? (x1 - x0) : (x0 - x1);
+
+    int sx =
+        (x0 < x1) ? 1 : -1;
+
+    int dy =
+        (y1 > y0) ? (y0 - y1) : (y1 - y0);
+
+    int sy =
+        (y0 < y1) ? 1 : -1;
+
+    int err = dx + dy;
+
+    while(1)
+    {
+        if(x0 >= 0 && x0 < 320 &&
+           y0 >= 0 && y0 < 240)
+        {
+            ST7789_DrawPixel(
+                (uint16_t)x0,
+                (uint16_t)y0,
+                color
+            );
+
+            /*
+             * Second pixel -> graph thickness = 2.
+             */
+            if(y0 + 1 < 240)
+            {
+                ST7789_DrawPixel(
+                    (uint16_t)x0,
+                    (uint16_t)(y0 + 1),
+                    color
+                );
+            }
+        }
+
+        if(x0 == x1 && y0 == y1)
+            break;
+
+        int e2 = 2 * err;
+
+        if(e2 >= dy)
+        {
+            err += dy;
+            x0 += sx;
+        }
+
+        if(e2 <= dx)
+        {
+            err += dx;
+            y0 += sy;
+        }
     }
 }
 
@@ -352,13 +434,19 @@ static void draw_graph_static(void)
                      SOL_TEMP_COLOR,
                      SOL_BG);
 
-    ST7789_PutString(110, 3,
+    ST7789_PutString(102, 3,
                      "I 0-10A",
                      1,
                      SOL_CURR_COLOR,
                      SOL_BG);
 
-    ST7789_PutString(230, 3,
+    ST7789_PutString(184, 3,
+                     "V 0-30V",
+                     1,
+                     SOL_VOUT_COLOR,
+                     SOL_BG);
+
+    ST7789_PutString(270, 3,
                      "SOLDER",
                      1,
                      ST7789_COLOR_YELLOW,
@@ -390,11 +478,14 @@ static void draw_graph_static(void)
     graph_last_x = -1;
     graph_last_yt = -1;
     graph_last_yi = -1;
+    graph_last_yv = -1;
     graph_has_last = 0U;
 
 }
 
-static void graph_push(float temp, float current)
+static void graph_push(float temp,
+                       float current,
+                       float vout)
 {
     int x = SOL_PLOT_X0 + (int)graph_head;
 
@@ -406,6 +497,10 @@ static void graph_push(float temp, float current)
                    SOL_CURR_MIN,
                    SOL_CURR_MAX);
 
+    int yv = map_y(vout,
+                   SOL_VOUT_MIN,
+                   SOL_VOUT_MAX);
+
     graph_clear_column(x);
 
     if(x + 1 <= SOL_PLOT_X1)
@@ -414,17 +509,26 @@ static void graph_push(float temp, float current)
     if(graph_has_last &&
        x > graph_last_x)
     {
+        /* Temperature: 0..500 C */
         draw_line_fast(graph_last_x,
                        graph_last_yt,
                        x,
                        yt,
                        SOL_TEMP_COLOR);
 
+        /* Current: 0..10 A */
         draw_line_fast(graph_last_x,
                        graph_last_yi,
                        x,
                        yi,
                        SOL_CURR_COLOR);
+
+        /* BB Vout: 0..30 V */
+        draw_line_fast(graph_last_x,
+                       graph_last_yv,
+                       x,
+                       yv,
+                       SOL_VOUT_COLOR);
     }
     else
     {
@@ -435,11 +539,16 @@ static void graph_push(float temp, float current)
         ST7789_DrawPixel((uint16_t)x,
                          (uint16_t)yi,
                          SOL_CURR_COLOR);
+
+        ST7789_DrawPixel((uint16_t)x,
+                         (uint16_t)yv,
+                         SOL_VOUT_COLOR);
     }
 
     graph_last_x = (int16_t)x;
     graph_last_yt = (int16_t)yt;
     graph_last_yi = (int16_t)yi;
+    graph_last_yv = (int16_t)yv;
     graph_has_last = 1U;
 
     graph_head++;
@@ -454,9 +563,9 @@ static void graph_push(float temp, float current)
 static void graph_task(void)
 {
     /*
-     * Draw exactly one graph point for each new temperature sample.
-     * This keeps the graph synchronized with the real solder ADC/PID
-     * update instead of running on a separate timer.
+     * New PID/ADC samples only mark graph_new_sample.
+     * Actual graph drawing happens when UI_Solider_Task()
+     * reaches the SOL_LCD_MS display tick.
      */
     if(graph_new_sample == 0U)
         return;
@@ -464,7 +573,8 @@ static void graph_task(void)
     graph_new_sample = 0U;
 
     graph_push(sol.tip_temp,
-               sol.current);
+               sol.current,
+               sol.vout);
 }
 
 /* =========================================================
@@ -715,22 +825,115 @@ static void target_beep_task(void)
 static void draw_sleep_base(void)
 {
     ST7789_FillScreen(SOL_BG);
-    ST7789_PutString(124,10,"SOLDER",2,SOL_MUTED_COLOR,SOL_BG);
-    ST7789_PutString(84,45,"SLEEP",5,SOL_SET_COLOR,SOL_BG);
-    ST7789_DrawFilledRectangle(30,102,260,1,SOL_GRID_COLOR);
-    ST7789_PutString(42,122,"TIP",2,SOL_TEMP_COLOR,SOL_BG);
-    ST7789_PutString(184,122,"SLEEP SET",1,SOL_SET_COLOR,SOL_BG);
-    ST7789_PutString(54,196,"PB11 LOW - IRON IN HOLDER",1,SOL_MUTED_COLOR,SOL_BG);
-    c_sleep_tip[0]='\0'; c_sleep_set[0]='\0';
+
+    ST7789_PutString(
+        124,
+        10,
+        "SOLDER",
+        2,
+        SOL_MUTED_COLOR,
+        SOL_BG
+    );
+
+    ST7789_PutString(
+        84,
+        45,
+        "SLEEP",
+        5,
+        SOL_SET_COLOR,
+        SOL_BG
+    );
+
+    ST7789_DrawFilledRectangle(
+        30,
+        102,
+        260,
+        1,
+        SOL_GRID_COLOR
+    );
+
+    ST7789_PutString(
+        42,
+        122,
+        "TIP",
+        2,
+        SOL_TEMP_COLOR,
+        SOL_BG
+    );
+
+    ST7789_PutString(
+        184,
+        122,
+        "SLEEP SET",
+        1,
+        SOL_SET_COLOR,
+        SOL_BG
+    );
+
+    ST7789_PutString(
+        54,
+        196,
+        "PB11 LOW - IRON IN HOLDER",
+        1,
+        SOL_MUTED_COLOR,
+        SOL_BG
+    );
+
+    c_sleep_tip[0] = '\0';
+    c_sleep_set[0] = '\0';
 }
 
 static void update_sleep_values(uint8_t force)
 {
-    char b[16]; if(force){c_sleep_tip[0]='\0';c_sleep_set[0]='\0';}
-    snprintf(b,sizeof(b),"%03uC",(unsigned)clampf_sol(sol.tip_temp,0.0f,999.0f));
-    draw_text_diff(34,146,3,SOL_TEMP_COLOR,b,c_sleep_tip,sizeof(c_sleep_tip));
-    snprintf(b,sizeof(b),"%03uC",(unsigned)clampf_sol(sol_sleep_temp,0.0f,999.0f));
-    draw_text_diff(182,146,3,SOL_SET_COLOR,b,c_sleep_set,sizeof(c_sleep_set));
+    char buf[16];
+
+    if(force)
+    {
+        c_sleep_tip[0] = '\0';
+        c_sleep_set[0] = '\0';
+    }
+
+    snprintf(
+        buf,
+        sizeof(buf),
+        "%03uC",
+        (unsigned)clampf_sol(
+            sol.tip_temp,
+            0.0f,
+            999.0f
+        )
+    );
+
+    draw_text_diff(
+        34,
+        146,
+        3,
+        SOL_TEMP_COLOR,
+        buf,
+        c_sleep_tip,
+        sizeof(c_sleep_tip)
+    );
+
+    snprintf(
+        buf,
+        sizeof(buf),
+        "%03uC",
+        (unsigned)clampf_sol(
+            sol_sleep_temp,
+            0.0f,
+            999.0f
+        )
+    );
+
+    draw_text_diff(
+        182,
+        146,
+        3,
+        SOL_SET_COLOR,
+        buf,
+        c_sleep_set,
+        sizeof(c_sleep_set)
+    );
 }
 
 /* =========================================================
@@ -745,6 +948,7 @@ void UI_Solider_Init(void)
     sol.current = 0.0f;
     sol.fet_temp = 25.0f;
     sol.power = 0.0f;
+    sol.vout = 0.0f;
 
     sol.preset[0] = 300.0f;
     sol.preset[1] = 350.0f;
@@ -785,7 +989,12 @@ void UI_Solider_Enter(void)
 
     graph_head = 0U;
     graph_has_last = 0U;
+
     graph_last_x = -1;
+    graph_last_yt = -1;
+    graph_last_yi = -1;
+    graph_last_yv = -1;
+
     graph_new_sample = 0U;
 
     lcd_tick = HAL_GetTick();
@@ -822,8 +1031,18 @@ uint8_t UI_Solider_GetEvents(void)
 
 void UI_Solider_SetTheme(uint8_t light)
 {
-    uint8_t n=light?1U:0U;
-    if(sol_theme_light!=n){sol_theme_light=n;force_redraw=1U;values_dirty=1U;clear_caches();}
+    uint8_t new_theme =
+        light ? 1U : 0U;
+
+    if(sol_theme_light == new_theme)
+        return;
+
+    sol_theme_light = new_theme;
+
+    force_redraw = 1U;
+    values_dirty = 1U;
+
+    clear_caches();
 }
 
 void UI_Solider_SetSleep(uint8_t sleep,
@@ -883,12 +1102,14 @@ void UI_Solider_SetSleep(uint8_t sleep,
 void UI_Solider_SetData(float tip_temp,
                         float current,
                         float fet_temp,
-                        float power)
+                        float power,
+                        float vout)
 {
     sol.tip_temp = tip_temp;
     sol.current = current;
     sol.fet_temp = fet_temp;
     sol.power = power;
+    sol.vout = vout;
 
     values_dirty = 1U;
     graph_new_sample = 1U;
@@ -919,7 +1140,9 @@ void UI_Solider_SetPreset(uint8_t id,
 
 void UI_Solider_SelectPreset(uint8_t id)
 {
-    if(sol_sleep) return;
+    if(sol_sleep)
+        return;
+
     if(id > 2U)
         return;
 
@@ -931,7 +1154,9 @@ void UI_Solider_SelectPreset(uint8_t id)
 
 void UI_Solider_EncoderAdjust(int8_t dir)
 {
-    if(sol_sleep) return;
+    if(sol_sleep)
+        return;
+
     if(dir == 0)
         return;
 
@@ -1039,14 +1264,23 @@ void UI_Solider_Task(uint8_t force)
 /* =========================================================
  * SOLDER ADC -> TEMPERATURE
  *
- * Preserved from the working station firmware:
- *     temp = (ADC - 450) * 1.85
+ * Temporary calibration currently used:
+ *
+ *     temp = (ADC - 1200) * 1.3
+ *
+ * Replace offset/gain after real 2-point calibration.
  * ========================================================= */
 
-static float clampf_solider(float x, float min, float max)
+static float clampf_solider(float x,
+                            float min,
+                            float max)
 {
-    if(x < min) return min;
-    if(x > max) return max;
+    if(x < min)
+        return min;
+
+    if(x > max)
+        return max;
+
     return x;
 }
 
@@ -1112,7 +1346,6 @@ static void Solider_PID_Reset(void)
 
     solider_current_filtered = 0.0f;
     solider_current_filter_init = 0U;
-
 
     SOLIDER_PWM_CCR = SOLIDER_CCR_OFF;
 }
@@ -1367,7 +1600,8 @@ void Solider_PID_Task(float set_adc)
                         measured_temp,
                         solider_current_filtered,
                         PowerStage.temp,
-                        solider_current_filtered * PowerStage.vout
+                        solider_current_filtered * PowerStage.vout,
+                        PowerStage.vout
                     );
 
                     solider_pid_state = SOLIDER_PID_RUN;

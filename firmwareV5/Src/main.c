@@ -78,122 +78,141 @@ static void MX_TIM4_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-#define ADC_MAX             4095.0f
-#define VREF                3.3f
 
-#define VIN_DIV_GAIN        11.0f
-#define VOUT_DIV_GAIN       11.0f
+/* =========================================================
+ * ADC / POWER STAGE CONSTANTS
+ * ========================================================= */
 
-#define NTC_R_PULLUP        10000.0f
-#define NTC_R0              50000.0f
-#define NTC_BETA            3950.0f
-#define NTC_T0_K            298.15f
+#define ADC_MAX                     4095.0f
+#define VREF                        3.3f
 
-#define SET_V_MIN           1.0f
-#define SET_V_MAX           36.0f
-#define SET_V_STEP          0.1f
+#define VIN_DIV_GAIN                11.0f
+#define VOUT_DIV_GAIN               11.0f
 
-#define ENC_COUNT_PER_STEP  4
+#define VIN_MIN_PROTECT             2.0f
+#define TEMP_MAX_PROTECT            80.0f
 
-#define POWERSTAGE_DUTY_MIN       0.01f
-#define POWERSTAGE_DUTY_MAX       0.99f
-#define POWERSTAGE_RATIO_MIN    0.01f
-#define POWERSTAGE_RATIO_MAX    0.99f
-
-#define CURRENT_MAX 	10.0f		// AMPE
-#define TEMP_MAX 			80.0f   //*C
-#define VSET_MIN            1.0f
-#define VSET_MAX            30.0f
-#define VSET_STEP           0.1f
-
-#define ISET_MIN            0.1f
-#define ISET_MAX            10.0f
-#define ISET_STEP           0.1f
-
-
-#define CTRL_TS              0.001f
-
-#define VIN_MIN_PROTECT      2.0f
-#define TEMP_MAX_PROTECT     80.0f
-
-#define RATIO_MIN            POWERSTAGE_DUTY_MIN
-#define RATIO_MAX            POWERSTAGE_DUTY_MAX
-
-#define CV_KP                0.01f
-#define CV_KI                0.9f
-
-#define CC_KP                0.01f
-#define CC_KI                1.3f
-
-#define CV_I_MIN            -0.30f
-#define CV_I_MAX             0.30f
-
-#define CC_I_MIN            -0.30f
-#define CC_I_MAX             0.30f
-
-#define SOFTSTART_RATE_VS    6.0f
-#define I_HARD_MARGIN        1.0f
-
+#define CURRENT_MAX                 10.0f
 #define I_HARD_LIMIT_A              8.5f
 #define POWER_START_BLANK_MS        200U
 
-/* Input-voltage droop limiter. Vin may be 12 V, 15 V, 20 V, etc. */
+#define CURRENT_GAIN                200.0f
+#define SHUNT_R                     0.001f
+
+
+/* =========================================================
+ * SETPOINT / RATIO LIMITS
+ * ========================================================= */
+
+#define VSET_MIN                    1.0f
+#define VSET_MAX                    30.0f
+#define VSET_STEP                   0.1f
+
+#define ISET_MIN                    0.1f
+#define ISET_MAX                    10.0f
+#define ISET_STEP                   0.1f
+
+#define POWERSTAGE_DUTY_MIN         0.05f
+#define POWERSTAGE_DUTY_MAX         0.95f
+
+#define RATIO_MIN                   POWERSTAGE_DUTY_MIN
+#define RATIO_MAX                   POWERSTAGE_DUTY_MAX
+
+
+/* =========================================================
+ * CONTROL FREQUENCIES
+ *
+ * TIM1 clock = 72 MHz
+ *
+ * PSC = 5
+ * ARR = 599
+ *
+ * PWM:
+ *   72 MHz / (5 + 1) / (599 + 1)
+ *   = 20 kHz
+ *
+ * RCR = 3:
+ *   Update IRQ = 20 kHz / (3 + 1)
+ *              = 5 kHz
+ *
+ * CC:
+ *   5 kHz
+ *   Ts = 200 us
+ *
+ * CV:
+ *   5 kHz / 5
+ *   = 1 kHz
+ *   Ts = 1 ms
+ * ========================================================= */
+
+#define CC_CTRL_HZ                  5000.0f
+#define CV_CTRL_HZ                  1000.0f
+
+#define CC_CTRL_TS                  0.0002f
+#define CV_CTRL_TS                  0.0010f
+
+#define CV_LOOP_DIV                 5U
+
+
+/* =========================================================
+ * PI PARAMETERS
+ * ========================================================= */
+
+#define CV_KP                       0.01f
+#define CV_KI                       1.9f
+
+#define CC_KP                       0.01f
+#define CC_KI                       1.5f
+
+#define CV_I_MIN                   -0.30f
+#define CV_I_MAX                    0.30f
+
+#define CC_I_MIN                   -0.30f
+#define CC_I_MAX                    0.30f
+
+#define SOFTSTART_RATE_VS           6.0f
+
+
+/* =========================================================
+ * INPUT VOLTAGE DROOP LIMITER
+ * ========================================================= */
+
 #define VIN_FILTER_ALPHA            0.20f
 #define VIN_REF_UPDATE_ALPHA        0.05f
+
 #define VIN_DROOP_ENTER_RATIO       0.90f
 #define VIN_DROOP_EXIT_RATIO        0.93f
+
 #define VIN_LIMIT_DOWN_RATE_AS      100.0f
 #define VIN_LIMIT_UP_RATE_AS        5.0f
+
 #define VIN_LIMIT_MIN_CURRENT       0.20f
-#define VIN_REF_LIGHT_CURRENT       0.30f
 
-volatile int16_t test_tim2;
-volatile int16_t test_tim4;
 
-static float vin_filtered = 0.0f;
-static float vin_reference = 0.0f;
-static float input_limited_iset = 0.0f;
-static uint8_t vin_filter_init = 0U;
-static uint8_t input_limit_active = 0U;
+/* =========================================================
+ * VIN FIR FILTER
+ *
+ * Sampled at CC frequency = 5 kHz
+ * N = 8
+ *
+ * Group delay:
+ *   (N - 1) / 2 * Ts
+ *   = 3.5 * 200 us
+ *   = 0.7 ms
+ * ========================================================= */
 
-static uint8_t power_prev_enable = 0;
-static uint32_t power_start_tick = 0;
-static float cv_i = 0.0f;
-static float cc_i = 0.0f;
-static float vref_soft = 0.0f;
-static float ratio_out = 0.5f;
-typedef enum
-{
-    PS_MODE_CV = 0,
-    PS_MODE_CC,
-    PS_MODE_CVCC
-} PowerMode_t;
+#define VIN_FIR_N                   8U
 
-typedef struct
-{
-    float kp;
-    float ki;
+static float vin_fir_buf[VIN_FIR_N] = {0.0f};
+static float vin_fir_sum = 0.0f;
+static uint8_t vin_fir_index = 0U;
+static uint8_t vin_fir_count = 0U;
 
-    float integral;
 
-    float out_min;
-    float out_max;
+/* =========================================================
+ * GLOBAL POWER-STAGE STATE
+ * ========================================================= */
 
-    float output;
-} PI_Controller_t;
-
-PI_Controller_t cv_pi =
-{
-    .kp = CV_KP,
-    .ki = CV_KI,
-
-    .integral = 0.0f,
-
-    .out_min = POWERSTAGE_RATIO_MIN,
-    .out_max = POWERSTAGE_RATIO_MAX,
-
-    .output = 0.5f       // b?t d?u t?i Vin = Vout
-};
 BBUI_Data_t PowerStage =
 {
     .vin = 0.0f,
@@ -204,14 +223,16 @@ BBUI_Data_t PowerStage =
     .vset = 12.0f,
     .iset = 2.0f,
 
-    .enable = 0,
+    .enable = 0U,
     .state = BBUI_STATE_OFF,
 
     .batt_cells = 3,
     .active_preset = 0,
     .mqtt_enable = 0,
-		.max_input_power = 200.0f,
+
+    .max_input_power = 200.0f,
     .start_mode = BB_START_SOFT,
+
     .preset =
     {
         {12.0f, 5.0f},
@@ -221,149 +242,208 @@ BBUI_Data_t PowerStage =
 };
 
 
+/* =========================================================
+ * ADC DMA
+ * ========================================================= */
 
-static volatile uint16_t adc_current_raw = 0;
-volatile uint8_t adc_current_ready = 0;
-
-static uint32_t t_adc = 0;
-static uint32_t t_lcd = 0;
-static uint8_t PowerStage_pwm_running = 0;
-#define ADC1_DMA_LEN 4
+#define ADC1_DMA_LEN                4U
+#define ADC_AVG_SAMPLES             30U
 
 uint16_t adc1_dma_buf[ADC1_DMA_LEN];
-uint8_t adc1_dma_ready = 0;
-static uint16_t ADC_Read_Channel(ADC_HandleTypeDef *hadc, uint32_t channel)
+uint8_t adc1_dma_ready = 0U;
+
+static uint32_t adc_sum[ADC1_DMA_LEN] = {0U};
+static uint16_t adc_avg[ADC1_DMA_LEN] = {0U};
+static uint16_t adc_sample_cnt = 0U;
+
+int adc_calib_offset = 0;
+
+
+/* =========================================================
+ * CONTROL STATE
+ * ========================================================= */
+
+static uint8_t PowerStage_pwm_running = 0U;
+static uint8_t power_prev_enable = 0U;
+
+static uint32_t power_start_tick = 0U;
+
+static float cv_i = 0.0f;
+static float cc_i = 0.0f;
+
+static float vref_soft = 0.0f;
+
+static float ratio_cv = RATIO_MIN;
+static float ratio_cc = RATIO_MIN;
+static float ratio_out = RATIO_MIN;
+
+static float effective_iset = 0.0f;
+
+static float current_fast = 0.0f;
+static float vin_raw_fast = 0.0f;
+
+static float vin_filtered_droop = 0.0f;
+static float vin_reference = 0.0f;
+static float input_limited_iset = 0.0f;
+
+static uint8_t vin_filter_init = 0U;
+static uint8_t input_limit_active = 0U;
+
+
+/* Debug counters */
+volatile uint32_t tim1_irq_count = 0U;
+volatile uint32_t cc_loop_count = 0U;
+volatile uint32_t cv_loop_count = 0U;
+
+
+/* =========================================================
+ * BASIC HELPERS
+ * ========================================================= */
+
+static float clampf(float x,
+                    float min,
+                    float max)
 {
-    ADC_ChannelConfTypeDef sConfig = {0};
+    if(x < min)
+        return min;
 
-    sConfig.Channel = channel;
-    sConfig.Rank = ADC_REGULAR_RANK_1;
-    sConfig.SamplingTime = ADC_SAMPLETIME_239CYCLES_5;
+    if(x > max)
+        return max;
 
-    HAL_ADC_ConfigChannel(hadc, &sConfig);
-
-    HAL_ADC_Start(hadc);
-    HAL_ADC_PollForConversion(hadc, 10);
-		uint32_t adc_value = 0;
-		adc_value = HAL_ADC_GetValue(hadc);
-    HAL_ADC_Stop(hadc);
-
-    return (uint16_t)adc_value;
+    return x;
 }
+
 
 static float ADC_To_Voltage(uint16_t adc)
 {
     return ((float)adc * VREF) / ADC_MAX;
 }
 
+
 static float Read_Vout(uint16_t adc_vout)
 {
-    return ADC_To_Voltage(adc_vout) * VOUT_DIV_GAIN;
+    return ADC_To_Voltage(adc_vout) *
+           VOUT_DIV_GAIN;
 }
+
 
 static float Read_Vin(uint16_t adc_vin)
 {
-    return ADC_To_Voltage(adc_vin) * VIN_DIV_GAIN;
+    return ADC_To_Voltage(adc_vin) *
+           VIN_DIV_GAIN;
 }
-static void PowerStage_UpdateIdleVinReference(void)
+
+
+static float Read_Current(uint16_t adc_current)
 {
-    /* Learn source no-load voltage only while the converter is disabled. */
-    if((PowerStage.enable == 0U) &&
-       (PowerStage.vin > VIN_MIN_PROTECT))
-    {
-        if(vin_reference < VIN_MIN_PROTECT)
-        {
-            vin_reference = PowerStage.vin;
-        }
-        else
-        {
-            vin_reference += VIN_REF_UPDATE_ALPHA *
-                             (PowerStage.vin - vin_reference);
-        }
-    }
+    float v_adc =
+        ((float)adc_current * VREF) /
+        ADC_MAX;
+
+    float current =
+        v_adc /
+        CURRENT_GAIN /
+        SHUNT_R;
+
+    if(current < 0.0f)
+        current = 0.0f;
+
+    return current;
 }
 
-static void PowerStage_InputDroopRuntimeReset(void)
+
+/* =========================================================
+ * VIN FIR
+ * ========================================================= */
+
+static float Vin_FIR_Filter(float vin_new)
 {
-    /* Keep vin_reference: it was learned while output was OFF. */
-    vin_filtered = PowerStage.vin;
-    input_limited_iset = PowerStage.iset;
-    vin_filter_init = 1U;
-    input_limit_active = 0U;
+    vin_fir_sum -=
+        vin_fir_buf[vin_fir_index];
+
+    vin_fir_buf[vin_fir_index] =
+        vin_new;
+
+    vin_fir_sum +=
+        vin_new;
+
+    vin_fir_index++;
+
+    if(vin_fir_index >= VIN_FIR_N)
+        vin_fir_index = 0U;
+
+    if(vin_fir_count < VIN_FIR_N)
+        vin_fir_count++;
+
+    return vin_fir_sum /
+           (float)vin_fir_count;
 }
 
-static float PowerStage_GetInputDroopCurrentLimit(void)
+
+/* =========================================================
+ * NTC
+ * ========================================================= */
+
+static uint16_t ADC_Read_Channel(
+    ADC_HandleTypeDef *hadc,
+    uint32_t channel)
 {
-    if(vin_filter_init == 0U)
-    {
-        PowerStage_InputDroopRuntimeReset();
-    }
+    ADC_ChannelConfTypeDef sConfig = {0};
 
-    vin_filtered += VIN_FILTER_ALPHA *
-                    (PowerStage.vin - vin_filtered);
+    sConfig.Channel = channel;
+    sConfig.Rank = ADC_REGULAR_RANK_1;
+    sConfig.SamplingTime =
+        ADC_SAMPLETIME_239CYCLES_5;
 
-    /* Fallback if output was enabled before a valid idle reference existed. */
-    if(vin_reference < VIN_MIN_PROTECT)
-    {
-        vin_reference = PowerStage.vin;
-    }
+    HAL_ADC_ConfigChannel(
+        hadc,
+        &sConfig
+    );
 
-    float vin_enter = vin_reference * VIN_DROOP_ENTER_RATIO;
-    float vin_exit  = vin_reference * VIN_DROOP_EXIT_RATIO;
+    HAL_ADC_Start(hadc);
+    HAL_ADC_PollForConversion(
+        hadc,
+        10
+    );
 
-    if(input_limit_active == 0U)
-    {
-        if(vin_filtered <= vin_enter)
-        {
-            input_limit_active = 1U;
-        }
-    }
-    else
-    {
-        if(vin_filtered >= vin_exit)
-        {
-            input_limit_active = 0U;
-        }
-    }
+    uint32_t adc_value =
+        HAL_ADC_GetValue(hadc);
 
-    if(input_limited_iset > PowerStage.iset)
-    {
-        input_limited_iset = PowerStage.iset;
-    }
+    HAL_ADC_Stop(hadc);
 
-    if(input_limit_active != 0U)
-    {
-        input_limited_iset -= VIN_LIMIT_DOWN_RATE_AS * CTRL_TS;
-    }
-    else
-    {
-        input_limited_iset += VIN_LIMIT_UP_RATE_AS * CTRL_TS;
-    }
-
-    if(input_limited_iset < VIN_LIMIT_MIN_CURRENT)
-        input_limited_iset = VIN_LIMIT_MIN_CURRENT;
-
-    if(input_limited_iset > PowerStage.iset)
-        input_limited_iset = PowerStage.iset;
-
-    return input_limited_iset;
+    return (uint16_t)adc_value;
 }
-uint16_t raw = 0;
+
+
+uint16_t raw = 0U;
+
 static float Read_NTC_Temp(void)
 {
-    raw = ADC_Read_Channel(&hadc2, ADC_CHANNEL_2);
+    raw =
+        ADC_Read_Channel(
+            &hadc2,
+            ADC_CHANNEL_2
+        );
+
     const float RFIX = 50000.0f;
+    const float R0 = 50000.0f;
+    const float T0 = 298.15f;
+    const float BETA = 3950.0f;
 
-    const float R0   = 50000.0f;   // 50k @ 25�C
-    const float T0   = 298.15f;    // 25�C Kelvin
-    const float BETA = 3950.0f;    // ph?i d�ng v?i NTC c?a b?n
+    float v =
+        ((float)raw / ADC_MAX) *
+        VREF;
 
-    float v = ((float)raw / 4095.0f) * VREF;
-
-    if(v <= 0.01f || v >= (VREF - 0.01f))
+    if(v <= 0.01f ||
+       v >= (VREF - 0.01f))
+    {
         return -100.0f;
+    }
 
-    float r_ntc = RFIX * v / (VREF - v);
+    float r_ntc =
+        RFIX *
+        v /
+        (VREF - v);
 
     float temp_k =
         1.0f /
@@ -373,521 +453,604 @@ static float Read_NTC_Temp(void)
             logf(r_ntc / R0)
         );
 
-    return temp_k - 273.15f + 30.0f;
-}
-#define CURRENT_GAIN        200.0f // 1.884
-#define SHUNT_R             0.002f
-uint16_t adc_offset = 0;
-static float Read_Current(uint16_t adc_current)
-{
-    float v_adc = (adc_current) * 3.3f / 4095.0f;
-    float current = (v_adc) / CURRENT_GAIN / SHUNT_R;
-    if(current < 0.0f)
-        current = 0.0f;
-    return current;
-}
-static float Read_Current_linear(uint16_t adc)
-{
-    float current = 0.00720f * adc - 2.1007f;
-
-    if(current < 0.0f)
-        current = 0.0f;
-
-    return current;
+    return temp_k -
+           273.15f +
+           30.0f;
 }
 
-static uint32_t adc_sum[ADC1_DMA_LEN] = {0};
-static uint16_t adc_avg[ADC1_DMA_LEN] = {0};
-static uint16_t adc_sample_cnt = 0;
-int adc_calib_offset = 0;
-void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
-{
-    (void)GPIO_Pin;
-    /* PB9 ON/OFF is polled + debounced inside BBUI_Task(). */
-}
+
+/* =========================================================
+ * PWM OUTPUT
+ *
+ * TIM1 counter must keep running continuously because its
+ * Update interrupt is the CC/CV scheduler.
+ *
+ * OFF:
+ *      MOE = 0
+ *
+ * ON:
+ *      MOE = 1
+ *
+ * Do NOT HAL_TIM_PWM_Stop() while TIM1 is used for control IRQ.
+ * ========================================================= */
 
 static void PowerStage_Start(void)
 {
-//    if(PowerStage_pwm_running)
-//        return;
+    __HAL_TIM_MOE_ENABLE(&htim1);
 
-    HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
-    HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_1);
-		HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
-    HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_2);
-    PowerStage_pwm_running = 1;
+    PowerStage_pwm_running = 1U;
 }
+
 
 static void PowerStage_Stop(void)
 {
-//    if(!PowerStage_pwm_running)
-//        return;
-		TIM1 -> CCR1 = 0;
-		TIM1 -> CCR2 = 0;
-    HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_1);
-    HAL_TIMEx_PWMN_Stop(&htim1, TIM_CHANNEL_1);
-		HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_2);
-    HAL_TIMEx_PWMN_Stop(&htim1, TIM_CHANNEL_2);
-    PowerStage_pwm_running = 0;
+    __HAL_TIM_MOE_DISABLE(&htim1);
+
+    PowerStage_pwm_running = 0U;
 }
-uint16_t duty_buck = 0, duty_boost = 0;
-static void PowerStage_SetRatio(float ratio)
+
+
+uint16_t duty_buck = 0U;
+uint16_t duty_boost = 0U;
+
+
+void PowerStage_SetRatio(float ratio)
 {
-    const float TRANSITION = 0.5f;
-    const uint32_t PWM_ARR = 950;
+    ratio =
+        clampf(
+            ratio,
+            RATIO_MIN,
+            RATIO_MAX
+        );
 
-    if(ratio < POWERSTAGE_DUTY_MIN)
-        ratio = POWERSTAGE_DUTY_MIN;
+    uint32_t arr =
+        TIM1->ARR;
 
-    if(ratio > POWERSTAGE_DUTY_MAX)
-        ratio = POWERSTAGE_DUTY_MAX;
+    uint32_t ccr =
+        (uint32_t)(
+            ratio *
+            (float)arr
+        );
+
+    duty_buck =
+        (uint16_t)ccr;
+
+    duty_boost =
+        (uint16_t)(
+            arr - ccr
+        );
+
+    /*
+     * Old ratio convention:
+     *
+     * CH1 = ratio
+     * CH2 = 1 - ratio
+     */
+    TIM1->CCR1 = duty_buck;
+    TIM1->CCR2 = duty_boost;
+}
 
 
-    /* =====================================================
-     * BUCK MODE
-     *
-     * ratio < 0.5
-     *
-     * Buck bridge:
-     *      Q1/Q2 PWM
-     *
-     * Boost bridge:
-     *      Q3 High-side ON
-     *      Q4 Low-side OFF
-     *
-     * V?i:
-     *
-     *      ratio = Vout / (Vin + Vout)
-     *
-     * suy ra:
-     *
-     *      D_buck = Vout / Vin
-     *             = ratio / (1 - ratio)
-     * ===================================================== */
-    if(ratio < TRANSITION)
+/* =========================================================
+ * INPUT VOLTAGE REFERENCE / DROOP LIMIT
+ * ========================================================= */
+
+static void PowerStage_UpdateIdleVinReference(void)
+{
+    if((PowerStage.enable == 0U) &&
+       (PowerStage.vin >
+        VIN_MIN_PROTECT))
     {
-        float d_buck =
-            ratio / (1.0f - ratio);
+        if(vin_reference <
+           VIN_MIN_PROTECT)
+        {
+            vin_reference =
+                PowerStage.vin;
+        }
+        else
+        {
+            vin_reference +=
+                VIN_REF_UPDATE_ALPHA *
+                (
+                    PowerStage.vin -
+                    vin_reference
+                );
+        }
+    }
+}
 
-        if(d_buck > 1.0f)
-            d_buck = 1.0f;
 
-        duty_buck =
-            (uint32_t)(d_buck * (float)PWM_ARR);
+static void PowerStage_InputDroopRuntimeReset(void)
+{
+    vin_filtered_droop =
+        PowerStage.vin;
 
-        /*
-         * High-side BOOST lu�n ON
-         */
-        duty_boost = PWM_ARR;
+    input_limited_iset =
+        PowerStage.iset;
 
-        TIM1->CCR1 = duty_buck;
-        TIM1->CCR2 = duty_boost;
+    vin_filter_init = 1U;
+    input_limit_active = 0U;
+}
+
+
+static float PowerStage_GetInputDroopCurrentLimit(void)
+{
+    if(vin_filter_init == 0U)
+    {
+        PowerStage_InputDroopRuntimeReset();
     }
 
+    vin_filtered_droop +=
+        VIN_FILTER_ALPHA *
+        (
+            PowerStage.vin -
+            vin_filtered_droop
+        );
 
-    /* =====================================================
-     * BOOST MODE
-     *
-     * ratio > 0.5
-     *
-     * Buck bridge:
-     *      Q1 High-side ON
-     *      Q2 Low-side OFF
-     *
-     * Boost bridge:
-     *      Q3/Q4 PWM
-     *
-     * High-side BOOST duty:
-     *
-     *      D_HS_boost = Vin / Vout
-     *
-     * V?i ratio hi?n t?i:
-     *
-     *      D_HS_boost = (1-ratio)/ratio
-     * ===================================================== */
-    else if(ratio > TRANSITION)
+    if(vin_reference <
+       VIN_MIN_PROTECT)
     {
-        float d_boost_hs =
-            (1.0f - ratio) / ratio;
-
-        if(d_boost_hs > 1.0f)
-            d_boost_hs = 1.0f;
-
-        /*
-         * High-side BUCK lu�n ON
-         */
-        duty_buck = PWM_ARR;
-
-        duty_boost =
-            (uint32_t)(d_boost_hs *
-                       (float)PWM_ARR);
-
-        TIM1->CCR1 = duty_buck;
-        TIM1->CCR2 = duty_boost;
+        vin_reference =
+            PowerStage.vin;
     }
 
+    float vin_enter =
+        vin_reference *
+        VIN_DROOP_ENTER_RATIO;
 
-    /* =====================================================
-     * TRANSITION
-     * Vin ~= Vout
-     *
-     * C? 2 High-side ON
-     * ===================================================== */
+    float vin_exit =
+        vin_reference *
+        VIN_DROOP_EXIT_RATIO;
+
+    if(input_limit_active == 0U)
+    {
+        if(vin_filtered_droop <=
+           vin_enter)
+        {
+            input_limit_active = 1U;
+        }
+    }
     else
     {
-        duty_buck  = PWM_ARR;
-        duty_boost = PWM_ARR;
-
-        TIM1->CCR1 = duty_buck;
-        TIM1->CCR2 = duty_boost;
+        if(vin_filtered_droop >=
+           vin_exit)
+        {
+            input_limit_active = 0U;
+        }
     }
-}
-float duty = 0;
-static void PowerStage_Control_OpenLoop(void)
-{
-//    if(!PowerStage.enable)
-//    {
-//				PowerStage_SetRatio(0);
-//        PowerStage_Stop();
-//        return;
-//    }
 
-//    if(PowerStage.vin < 2.0f)
-//    {
-//        PowerStage_Stop();
-//        PowerStage.enable = 0;
-//        return;
-//    }
-
-//    if(PowerStage.current > 3.0f || PowerStage.temp > 80.0f)
-//    {
-//        PowerStage_Stop();
-//        PowerStage.enable = 0;
-//        return;
-//    }
-		
-    duty = PowerStage.vset / PowerStage.vin;
-    
-    PowerStage_SetRatio(0.6f);
-}
-static void PowerStage_Control_CloseLoop(void)
-{
-    if(!PowerStage.enable)
+    if(input_limited_iset >
+       PowerStage.iset)
     {
-        cv_pi.integral = 0.0f;
-        cv_pi.output = 0.5f;
-
-        PowerStage_SetRatio(0.5f);
-        PowerStage_Stop();
-        return;
+        input_limited_iset =
+            PowerStage.iset;
     }
 
-    if(PowerStage.vin < 2.0f)
+    /*
+     * This function runs at CV frequency = 1 kHz.
+     */
+    if(input_limit_active != 0U)
     {
-        PowerStage_Stop();
-        PowerStage.enable = 0;
-        return;
+        input_limited_iset -=
+            VIN_LIMIT_DOWN_RATE_AS *
+            CV_CTRL_TS;
     }
-
-    if(PowerStage.current > CURRENT_MAX || PowerStage.temp > TEMP_MAX)
+    else
     {
-        PowerStage_Stop();
-        PowerStage.enable = 0;
-        return;
+        input_limited_iset +=
+            VIN_LIMIT_UP_RATE_AS *
+            CV_CTRL_TS;
     }
 
-    PowerStage_Start();
+    input_limited_iset =
+        clampf(
+            input_limited_iset,
+            VIN_LIMIT_MIN_CURRENT,
+            PowerStage.iset
+        );
 
-    //---------------------------------------
-    // Voltage PI
-    //---------------------------------------
-
-    float error = PowerStage.vset - PowerStage.vout;
-
-    cv_pi.integral += cv_pi.ki * error * CTRL_TS;
-
-    float output = cv_pi.kp * error + cv_pi.integral;
-
-    //---------------------------------------
-    // Anti-windup
-    //---------------------------------------
-
-    if(output > cv_pi.out_max)
-    {
-        output = cv_pi.out_max;
-
-        if(error > 0)
-            cv_pi.integral -= cv_pi.ki * error * CTRL_TS;
-    }
-
-    if(output < cv_pi.out_min)
-    {
-        output = cv_pi.out_min;
-
-        if(error < 0)
-            cv_pi.integral -= cv_pi.ki * error * CTRL_TS;
-    }
-
-    cv_pi.output = output;
-
-    PowerStage_SetRatio(output);
+    return input_limited_iset;
 }
 
 
-static float clampf(float x, float min, float max)
-{
-    if(x < min) return min;
-    if(x > max) return max;
-    return x;
-}
-static float PowerStage_FeedForward_Ratio(float vin, float vref)
+/* =========================================================
+ * FEED FORWARD
+ * ========================================================= */
+
+static float PowerStage_FeedForward_Ratio(
+    float vin,
+    float vref)
 {
     if(vin < 0.5f)
-        return 0.5f;
+        return RATIO_MIN;
 
     if(vref < 0.5f)
         return RATIO_MIN;
 
-    float ratio = vref / (vin + vref);
+    float ratio =
+        vref /
+        (vin + vref);
 
-    return clampf(ratio, RATIO_MIN, RATIO_MAX);
+    return clampf(
+        ratio,
+        RATIO_MIN,
+        RATIO_MAX
+    );
 }
+
+
+/* =========================================================
+ * SOFT START REFERENCE
+ *
+ * Runs only at CV frequency = 1 kHz.
+ * ========================================================= */
+
 static void PowerStage_StartReference_1kHz(void)
 {
-    if(PowerStage.enable == 0)
+    if(PowerStage.enable == 0U)
     {
         vref_soft = 0.0f;
         return;
     }
 
-    if(PowerStage.start_mode == BB_START_HARD)
+    if(PowerStage.start_mode ==
+       BB_START_HARD)
     {
-        vref_soft = PowerStage.vset;
+        vref_soft =
+            PowerStage.vset;
+
         return;
     }
 
-    /*
-     * Soft-start.
-     */
-    if(vref_soft < PowerStage.vset)
+    if(vref_soft <
+       PowerStage.vset)
     {
-        vref_soft += SOFTSTART_RATE_VS * CTRL_TS;
+        vref_soft +=
+            SOFTSTART_RATE_VS *
+            CV_CTRL_TS;
 
-        if(vref_soft > PowerStage.vset)
-            vref_soft = PowerStage.vset;
+        if(vref_soft >
+           PowerStage.vset)
+        {
+            vref_soft =
+                PowerStage.vset;
+        }
     }
     else
     {
-        vref_soft = PowerStage.vset;
+        vref_soft =
+            PowerStage.vset;
     }
 }
+
+
+/* =========================================================
+ * CONTROL RESET
+ * ========================================================= */
+
 static void PowerStage_CVCC_Reset(void)
 {
     cv_i = 0.0f;
     cc_i = 0.0f;
 
     vref_soft = 0.0f;
-    ratio_out = 0.5f;
+
+    ratio_cv = RATIO_MIN;
+    ratio_cc = RATIO_MIN;
+    ratio_out = RATIO_MIN;
+
+    effective_iset =
+        PowerStage.iset;
 }
-void PowerStage_CloseLoop_CVCC_1kHz(void)
+
+
+/* =========================================================
+ * MEASUREMENTS
+ *
+ * FAST @ 5 kHz:
+ *      raw current for CC
+ *      raw Vin -> FIR8
+ *
+ * SLOW @ 1 kHz:
+ *      Vout filtered
+ *      Current display filtered
+ *      idle Vin reference
+ * ========================================================= */
+
+static void PowerStage_UpdateMeasurements_5kHz(void)
 {
-    uint32_t now = HAL_GetTick();
+    vin_raw_fast =
+        Read_Vin(
+            adc1_dma_buf[3]
+        );
+
+    PowerStage.vin =
+        Vin_FIR_Filter(
+            vin_raw_fast
+        );
+
+    current_fast =
+        Read_Current(
+            adc1_dma_buf[1]
+        );
+}
+
+
+static void PowerStage_UpdateMeasurements_1kHz(void)
+{
+    if(adc1_dma_ready == 0U)
+    {
+        PowerStage_UpdateIdleVinReference();
+        return;
+    }
+
+    float vout_new =
+        Read_Vout(
+            adc_avg[0]
+        );
+
+    float current_new =
+        Read_Current(
+            adc_avg[1]
+        );
+
+    PowerStage.vout +=
+        0.40f *
+        (
+            vout_new -
+            PowerStage.vout
+        );
+
+    PowerStage.current +=
+        0.40f *
+        (
+            current_new -
+            PowerStage.current
+        );
+
+    PowerStage_UpdateIdleVinReference();
+}
+
+
+/* =========================================================
+ * ENABLE / PROTECTION
+ *
+ * Called at 5 kHz.
+ * ========================================================= */
+
+static uint8_t PowerStage_Service_5kHz(void)
+{
+    uint32_t now =
+        HAL_GetTick();
 
     /*
-     * =====================================================
-     * PH?T HI?N C?NH B?T NGU?N
-     * =====================================================
-     */
-    if((PowerStage.enable != 0U) &&
-			 (power_prev_enable == 0U))
-		{
-				power_start_tick = now;
-
-				cv_i = 0.0f;
-				cc_i = 0.0f;
-				ratio_out = RATIO_MIN;
-				vref_soft = 0.0f;
-
-                PowerStage_InputDroopRuntimeReset();
-
-				PowerStage_Start();
-		}
-
-    power_prev_enable = PowerStage.enable;
-
-    /* Fast droop immediate check: use raw DMA ADC sample (no averaging)
-       to detect large input sag from inrush and trip immediately. */
-//    {
-//      uint16_t vin_raw_fast = adc1_dma_buf[3];
-//      float vin_fast = Read_Vin(vin_raw_fast);
-//      if(vin_reference > VIN_MIN_PROTECT)
-//      {
-//        float vin_fast_enter = vin_reference * 0.88f;
-//        if(vin_fast <= vin_fast_enter)
-//        {
-//          /* Immediate fault: stop PWM and disable output */
-//          PowerStage_CVCC_Reset();
-
-//          PowerStage.enable = 0U;
-//          PowerStage.state = BBUI_STATE_FAULT;
-
-//          PowerStage_Stop();
-
-//          power_prev_enable = 0U;
-
-//          return;
-//        }
-//      }
-//    }
-
-    /*
-     * =====================================================
-     * OUTPUT OFF
-     * =====================================================
+     * Output OFF:
+     * TIM1 keeps counting.
+     * Only PWM outputs are disabled with MOE.
      */
     if(PowerStage.enable == 0U)
     {
+        if(power_prev_enable != 0U ||
+           PowerStage_pwm_running != 0U)
+        {
+            PowerStage_Stop();
+        }
+
+        power_prev_enable = 0U;
+
+        PowerStage.state =
+            BBUI_STATE_OFF;
+
         PowerStage_CVCC_Reset();
 
-        PowerStage.state = BBUI_STATE_OFF;
-
-        PowerStage_Stop();
-
-        return;
+        return 0U;
     }
 
     /*
-     * =====================================================
-     * B?O V? ?I?N ?P V?O
-     * =====================================================
+     * Do not enable MOSFETs until VIN is valid.
      */
-    if(PowerStage.vin < VIN_MIN_PROTECT)
+    if(PowerStage.vin <
+       VIN_MIN_PROTECT)
     {
-        PowerStage_CVCC_Reset();
-
-        PowerStage.enable = 0U;
-        PowerStage.state = BBUI_STATE_FAULT;
+        PowerStage.state =
+            BBUI_STATE_OFF;
 
         PowerStage_Stop();
 
         power_prev_enable = 0U;
 
-        return;
+        return 0U;
     }
 
     /*
-     * =====================================================
-     * B?O V? NHI?T ??
-     * =====================================================
+     * OFF -> ON edge.
      */
-    if(PowerStage.temp > TEMP_MAX_PROTECT)
+    if(power_prev_enable == 0U)
+    {
+        power_start_tick =
+            now;
+
+        PowerStage_CVCC_Reset();
+
+        PowerStage_InputDroopRuntimeReset();
+
+        /*
+         * Prepare initial duty BEFORE enabling MOE.
+         */
+        PowerStage_SetRatio(
+            RATIO_MIN
+        );
+
+        PowerStage_Start();
+
+        power_prev_enable = 1U;
+    }
+
+    /*
+     * Temperature fault.
+     */
+    if(PowerStage.temp >
+       TEMP_MAX_PROTECT)
     {
         PowerStage_CVCC_Reset();
 
         PowerStage.enable = 0U;
-        PowerStage.state = BBUI_STATE_FAULT;
+        PowerStage.state =
+            BBUI_STATE_FAULT;
 
         PowerStage_Stop();
 
         power_prev_enable = 0U;
 
-        return;
+        return 0U;
     }
 
     /*
-     * =====================================================
-     * B?O V? QU? D?NG C?NG
-     * =====================================================
+     * Hard-current fault.
      *
-     * B? qua trong 200 ms d?u d? tr?nh d?ng do cu,
-     * spike chuy?n relay ho?c xung kh?i d?ng g?y false fault.
-     *
-     * Gi?i h?n c?ng su?t kh?ng du?c d?ng l?m ngu?ng FAULT.
+     * Use current_fast, not the slow display current.
      */
-    if((uint32_t)(now - power_start_tick) >=
-       POWER_START_BLANK_MS)
+    if((uint32_t)(
+           now -
+           power_start_tick
+       ) >= POWER_START_BLANK_MS)
     {
-        if(PowerStage.current > I_HARD_LIMIT_A)
+        if(current_fast >
+           I_HARD_LIMIT_A)
         {
             PowerStage_CVCC_Reset();
 
             PowerStage.enable = 0U;
-            PowerStage.state = BBUI_STATE_FAULT;
+            PowerStage.state =
+                BBUI_STATE_FAULT;
 
             PowerStage_Stop();
 
             power_prev_enable = 0U;
 
-            return;
+            return 0U;
         }
     }
 
-    /*
-     * B?o d?m PWM d? du?c b?t.
-     * N?u PowerStage_Start() ch? c?n g?i m?t l?n,
-     * c? th? b? d?ng n?y v? d? g?i ? c?nh enable.
-     */
-    PowerStage_Start();
+    return 1U;
+}
 
-    /*
-     * =====================================================
-     * HARD-START / SOFT-START REFERENCE
-     * =====================================================
-     */
+
+/* =========================================================
+ * CV LOOP = 1 kHz
+ *
+ * Ts = 1 ms
+ *
+ * Only calculates ratio_cv.
+ * Final PWM is selected by CC loop using:
+ *
+ *      ratio_out = min(ratio_cv, ratio_cc)
+ * ========================================================= */
+
+static void PowerStage_CV_Loop_1kHz(void)
+{
+    cv_loop_count++;
+
     PowerStage_StartReference_1kHz();
 
-    /*
-     * Ph?i t?nh effective_iset sau khi c?p nh?t vref_soft,
-     * v? gi?i h?n c?ng su?t c? th? ph? thu?c vref_soft.
-     */
-    float effective_iset = PowerStage_GetInputDroopCurrentLimit();
+    effective_iset =
+        PowerStage_GetInputDroopCurrentLimit();
 
-    /*
-     * =====================================================
-     * FEED-FORWARD
-     * =====================================================
-     */
     float ratio_ff =
-        PowerStage_FeedForward_Ratio(PowerStage.vin,
-                                     vref_soft);
+        PowerStage_FeedForward_Ratio(
+            PowerStage.vin,
+            vref_soft
+        );
 
-    /*
-     * =====================================================
-     * SAI S? CV V? CC
-     * =====================================================
-     */
     float err_v =
-        vref_soft - PowerStage.vout;
+        vref_soft -
+        PowerStage.vout;
 
-    float err_i =
-        effective_iset - PowerStage.current;
-
-    /*
-     * =====================================================
-     * T?CH PH?N T?M TH?I
-     * =====================================================
-     */
     float cv_i_new =
-        cv_i + CV_KI * err_v * CTRL_TS;
-
-    float cc_i_new =
-        cc_i + CC_KI * err_i * CTRL_TS;
+        cv_i +
+        CV_KI *
+        err_v *
+        CV_CTRL_TS;
 
     cv_i_new =
-        clampf(cv_i_new, CV_I_MIN, CV_I_MAX);
+        clampf(
+            cv_i_new,
+            CV_I_MIN,
+            CV_I_MAX
+        );
 
-    cc_i_new =
-        clampf(cc_i_new, CC_I_MIN, CC_I_MAX);
-
-    /*
-     * =====================================================
-     * ??U RA PI CHUA B?O H?A
-     * =====================================================
-     */
     float ratio_cv_unsat =
         ratio_ff +
         CV_KP * err_v +
         cv_i_new;
+
+    /*
+     * Anti-windup.
+     */
+    if(!(
+        (
+            ratio_cv_unsat >
+            RATIO_MAX &&
+            err_v > 0.0f
+        ) ||
+        (
+            ratio_cv_unsat <
+            RATIO_MIN &&
+            err_v < 0.0f
+        )
+    ))
+    {
+        cv_i = cv_i_new;
+    }
+
+    ratio_cv =
+        ratio_ff +
+        CV_KP * err_v +
+        cv_i;
+
+    ratio_cv =
+        clampf(
+            ratio_cv,
+            RATIO_MIN,
+            RATIO_MAX
+        );
+}
+
+
+/* =========================================================
+ * CC LOOP = 5 kHz
+ *
+ * Ts = 200 us
+ *
+ * Uses current_fast from latest ADC DMA sample.
+ * ========================================================= */
+
+static void PowerStage_CC_Loop_5kHz(void)
+{
+    cc_loop_count++;
+
+    float ratio_ff =
+        PowerStage_FeedForward_Ratio(
+            PowerStage.vin,
+            vref_soft
+        );
+
+    float err_i =
+        effective_iset -
+        current_fast;
+
+    float cc_i_new =
+        cc_i +
+        CC_KI *
+        err_i *
+        CC_CTRL_TS;
+
+    cc_i_new =
+        clampf(
+            cc_i_new,
+            CC_I_MIN,
+            CC_I_MAX
+        );
 
     float ratio_cc_unsat =
         ratio_ff +
@@ -895,156 +1058,313 @@ void PowerStage_CloseLoop_CVCC_1kHz(void)
         cc_i_new;
 
     /*
-     * =====================================================
-     * ANTI-WINDUP CV
-     * =====================================================
+     * Anti-windup.
      */
-    if(!((ratio_cv_unsat > RATIO_MAX &&
-          err_v > 0.0f) ||
-         (ratio_cv_unsat < RATIO_MIN &&
-          err_v < 0.0f)))
-    {
-        cv_i = cv_i_new;
-    }
-
-    /*
-     * =====================================================
-     * ANTI-WINDUP CC
-     * =====================================================
-     */
-    if(!((ratio_cc_unsat > RATIO_MAX &&
-          err_i > 0.0f) ||
-         (ratio_cc_unsat < RATIO_MIN &&
-          err_i < 0.0f)))
+    if(!(
+        (
+            ratio_cc_unsat >
+            RATIO_MAX &&
+            err_i > 0.0f
+        ) ||
+        (
+            ratio_cc_unsat <
+            RATIO_MIN &&
+            err_i < 0.0f
+        )
+    ))
     {
         cc_i = cc_i_new;
     }
 
-    /*
-     * T?nh l?i output b?ng gi? tr? t?ch ph?n d? du?c ch?p nh?n.
-     */
-    float ratio_cv =
-        ratio_ff +
-        CV_KP * err_v +
-        cv_i;
-
-    float ratio_cc =
+    ratio_cc =
         ratio_ff +
         CC_KP * err_i +
         cc_i;
 
-    ratio_cv =
-        clampf(ratio_cv, RATIO_MIN, RATIO_MAX);
-
     ratio_cc =
-        clampf(ratio_cc, RATIO_MIN, RATIO_MAX);
+        clampf(
+            ratio_cc,
+            RATIO_MIN,
+            RATIO_MAX
+        );
 
     /*
-     * =====================================================
-     * CH?N V?NG ?I?U KHI?N CH?T HON
-     * =====================================================
-     *
-     * Gi? tr? ratio nh? hon s? h?n ch? c?ng su?t nhi?u hon.
+     * Tightest limiter wins.
      */
-    if(ratio_cc < ratio_cv)
+    if(ratio_cc <
+       ratio_cv)
     {
-        ratio_out = ratio_cc;
-        PowerStage.state = BBUI_STATE_CC;
+        ratio_out =
+            ratio_cc;
+
+        PowerStage.state =
+            BBUI_STATE_CC;
     }
     else
     {
-        ratio_out = ratio_cv;
-        PowerStage.state = BBUI_STATE_CV;
+        ratio_out =
+            ratio_cv;
+
+        PowerStage.state =
+            BBUI_STATE_CV;
     }
 
     ratio_out =
-        clampf(ratio_out, RATIO_MIN, RATIO_MAX);
+        clampf(
+            ratio_out,
+            RATIO_MIN,
+            RATIO_MAX
+        );
 
-    PowerStage_SetRatio(ratio_out);
+    PowerStage_SetRatio(
+        ratio_out
+    );
 }
-void Buck_UI_Init(void)
+
+
+/* =========================================================
+ * TIM1 UPDATE ISR CALLBACK
+ *
+ * TIM1 Update = 5 kHz.
+ *
+ * Every interrupt:
+ *      measurement fast
+ *      protection
+ *      CC loop
+ *
+ * Every 5 interrupts:
+ *      measurement slow
+ *      CV loop
+ * ========================================================= */
+
+void HAL_TIM_PeriodElapsedCallback(
+    TIM_HandleTypeDef *htim)
 {
-    HAL_ADCEx_Calibration_Start(&hadc1);
-    HAL_ADCEx_Calibration_Start(&hadc2);
-
-    PowerStage_Stop();
-
-    HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc1_dma_buf, ADC1_DMA_LEN);
-		HAL_Delay(700);
-
-    BBUI_Init(&PowerStage, &htim4, &htim2);
-		
-    HAL_TIM_Base_Start_IT(&htim3);
-		//while(!adc_calib_offset);
-}
-uint32_t lastTime_readTemp = 0;
-float temp_new;
-void handle_temp(){
-		if(HAL_GetTick() -  lastTime_readTemp > 500)
-		{
-			lastTime_readTemp = HAL_GetTick();
-			temp_new = Read_NTC_Temp();
-			PowerStage.temp = PowerStage.temp * 0.9f + temp_new * 0.1f;
-//			if(PowerStage.temp >= 40.0f)
-//			{
-//				HAL_GPIO_WritePin(GPIOC, GPIO_PIN_15, 1);
-//			}
-//			else if(PowerStage.temp < 38.0f)
-//			{
-//				HAL_GPIO_WritePin(GPIOC, GPIO_PIN_15, 0);
-//			}
-		}
-		
-}
-void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
-{
-    if(htim->Instance != TIM3)
+    if(htim->Instance != TIM1)
         return;
 
-    /* Update measurements first. */
-    float vin_new = Read_Vin(adc_avg[3]);
-    float vout_new = Read_Vout(adc_avg[0]);
-    float current_new = Read_Current(adc_avg[1]);
-   
-    PowerStage.vin += 0.4f * (vin_new - PowerStage.vin);
-    PowerStage.vout += 0.4f * (vout_new - PowerStage.vout);
-    PowerStage.current += 0.4f * (current_new - PowerStage.current);
+    static uint8_t cv_div = 0U;
 
-    /* Learn the actual source voltage while output is off. */
-//    PowerStage_UpdateIdleVinReference();
-		//PowerStage_Control_OpenLoop();
-    /* CloseLoop handles OFF, protection, CV, CC and Vin-droop limiting. */
-    PowerStage_CloseLoop_CVCC_1kHz();
+    tim1_irq_count++;
+
+    /*
+     * Measurement always runs,
+     * even when BB output is OFF.
+     */
+    PowerStage_UpdateMeasurements_5kHz();
+
+    cv_div++;
+
+    uint8_t run_cv = 0U;
+
+    if(cv_div >= CV_LOOP_DIV)
+    {
+        cv_div = 0U;
+        run_cv = 1U;
+
+        PowerStage_UpdateMeasurements_1kHz();
+    }
+
+    /*
+     * If output is OFF or protection has tripped,
+     * do not run PI loops.
+     */
+    if(PowerStage_Service_5kHz() == 0U)
+        return;
+
+    /*
+     * Run CV first when both loops are due.
+     */
+    if(run_cv != 0U)
+    {
+        PowerStage_CV_Loop_1kHz();
+    }
+
+    PowerStage_CC_Loop_5kHz();
 }
 
-#define ADC_AVG_SAMPLES 30
-void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
+
+/* =========================================================
+ * ADC DMA CALLBACK
+ * ========================================================= */
+
+void HAL_ADC_ConvCpltCallback(
+    ADC_HandleTypeDef *hadc)
 {
-    if(hadc->Instance == ADC1)
+    if(hadc->Instance != ADC1)
+        return;
+
+    adc_sum[0] +=
+        adc1_dma_buf[0];
+
+    adc_sum[1] +=
+        adc1_dma_buf[1];
+
+    adc_sum[3] +=
+        adc1_dma_buf[3];
+
+    adc_sample_cnt++;
+
+    if(adc_sample_cnt >=
+       ADC_AVG_SAMPLES)
     {
-        adc_sum[0] += adc1_dma_buf[0];
-        adc_sum[1] += adc1_dma_buf[1];
-        adc_sum[3] += adc1_dma_buf[3];
+        adc_avg[0] =
+            (uint16_t)(
+                adc_sum[0] /
+                ADC_AVG_SAMPLES
+            );
 
-        adc_sample_cnt++;
+        adc_avg[1] =
+            (uint16_t)(
+                adc_sum[1] /
+                ADC_AVG_SAMPLES
+            );
 
-        if(adc_sample_cnt >= ADC_AVG_SAMPLES)
-        {
-            adc_avg[0] = adc_sum[0] / ADC_AVG_SAMPLES;
-            adc_avg[1] = adc_sum[1] / ADC_AVG_SAMPLES;
-            adc_avg[3] = adc_sum[3] / ADC_AVG_SAMPLES;
+        adc_avg[3] =
+            (uint16_t)(
+                adc_sum[3] /
+                ADC_AVG_SAMPLES
+            );
 
-            adc_sum[0] = 0;
-            adc_sum[1] = 0;
-            adc_sum[3] = 0;
+        adc_sum[0] = 0U;
+        adc_sum[1] = 0U;
+        adc_sum[3] = 0U;
 
-            adc_sample_cnt = 0;
-            adc1_dma_ready = 1;
-            adc_calib_offset = 1;
-        }
+        adc_sample_cnt = 0U;
+
+        adc1_dma_ready = 1U;
+        adc_calib_offset = 1;
     }
 }
+
+
+/* =========================================================
+ * GPIO CALLBACK
+ * ========================================================= */
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+    (void)GPIO_Pin;
+
+    /*
+     * PB9 ON/OFF is polled + debounced
+     * inside BBUI_Task().
+     */
+}
+
+
+/* =========================================================
+ * INIT
+ * ========================================================= */
+
+void Buck_UI_Init(void)
+{
+    HAL_ADCEx_Calibration_Start(
+        &hadc1
+    );
+
+    HAL_ADCEx_Calibration_Start(
+        &hadc2
+    );
+
+    /*
+     * ADC must run before the output can be enabled.
+     */
+    HAL_ADC_Start_DMA(
+        &hadc1,
+        (uint32_t *)adc1_dma_buf,
+        ADC1_DMA_LEN
+    );
+
+    HAL_Delay(100);
+
+    /*
+     * UI / encoders.
+     */
+    BBUI_Init(
+        &PowerStage,
+        &htim4,
+        &htim2
+    );
+
+    /*
+     * Prepare minimum ratio before TIM1 PWM channels start.
+     */
+    PowerStage_SetRatio(
+        RATIO_MIN
+    );
+
+    /*
+     * Start TIM1 PWM channels ONCE.
+     *
+     * TIM1 counter will stay alive permanently.
+     */
+    HAL_TIM_PWM_Start(
+        &htim1,
+        TIM_CHANNEL_1
+    );
+
+    HAL_TIMEx_PWMN_Start(
+        &htim1,
+        TIM_CHANNEL_1
+    );
+
+    HAL_TIM_PWM_Start(
+        &htim1,
+        TIM_CHANNEL_2
+    );
+
+    HAL_TIMEx_PWMN_Start(
+        &htim1,
+        TIM_CHANNEL_2
+    );
+
+    /*
+     * Boot with BB output OFF.
+     */
+    PowerStage_Stop();
+
+    /*
+     * TIM1 Update interrupt = 5 kHz.
+     */
+    HAL_TIM_Base_Start_IT(
+        &htim1
+    );
+}
+
+
+/* =========================================================
+ * TEMPERATURE TASK
+ * ========================================================= */
+
+uint32_t lastTime_readTemp = 0U;
+float temp_new = 0.0f;
+
+void handle_temp(void)
+{
+    if(
+        (HAL_GetTick() -
+         lastTime_readTemp) >
+        500U
+    )
+    {
+        lastTime_readTemp =
+            HAL_GetTick();
+
+        temp_new =
+            Read_NTC_Temp();
+
+        PowerStage.temp =
+            PowerStage.temp *
+            0.90f +
+            temp_new *
+            0.10f;
+    }
+}
+
+
 int sleep = 0;
+
 /* USER CODE END 0 */
 
 /**
@@ -1091,11 +1411,10 @@ int main(void)
      *  - ADC1 calibration + DMA
      *  - power stage OFF
      *  - BBUI_Init(&PowerStage, &htim2, &htim4)
-     *  - TIM3 1 kHz control interrupt
+     *  - TIM1 Update = 5 kHz control interrupt
      *  - ST7789 init is performed by BBUI_Init()
      */
     Buck_UI_Init();
-		PowerStage_Start();
     /* Normal buck-boost path selected at boot. */
     HAL_GPIO_WritePin(GPIOB, GPIO_PIN_15, GPIO_PIN_RESET);
 
@@ -1114,18 +1433,13 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-
     /*
      * UI:
      *  TIM2 encoder -> VSET
      *  TIM4 encoder -> ISET
      *  PB9          -> Output ON/OFF
      */
-		
-		
     BBUI_Task();
-//		TIM3 -> CCR2 = 500;
-    /* Slow NTC / fan handling */
     handle_temp();
   }
   /* USER CODE END 3 */
@@ -1214,7 +1528,7 @@ static void MX_ADC1_Init(void)
   */
   sConfig.Channel = ADC_CHANNEL_0;
   sConfig.Rank = ADC_REGULAR_RANK_1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_239CYCLES_5;
+  sConfig.SamplingTime = ADC_SAMPLETIME_71CYCLES_5;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
     Error_Handler();
@@ -1360,9 +1674,9 @@ static void MX_TIM1_Init(void)
   htim1.Instance = TIM1;
   htim1.Init.Prescaler = 5;
   htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim1.Init.Period = 1000;
+  htim1.Init.Period = 599;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim1.Init.RepetitionCounter = 0;
+  htim1.Init.RepetitionCounter = 3;
   htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim1) != HAL_OK)
   {
@@ -1403,7 +1717,7 @@ static void MX_TIM1_Init(void)
   sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
   sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
   sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
-  sBreakDeadTimeConfig.DeadTime = 50;
+  sBreakDeadTimeConfig.DeadTime = 25;
   sBreakDeadTimeConfig.BreakState = TIM_BREAK_DISABLE;
   sBreakDeadTimeConfig.BreakPolarity = TIM_BREAKPOLARITY_HIGH;
   sBreakDeadTimeConfig.AutomaticOutput = TIM_AUTOMATICOUTPUT_DISABLE;
@@ -1487,7 +1801,7 @@ static void MX_TIM3_Init(void)
 
   /* USER CODE END TIM3_Init 1 */
   htim3.Instance = TIM3;
-  htim3.Init.Prescaler = 71;
+  htim3.Init.Prescaler = 35;
   htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim3.Init.Period = 1000;
   htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;

@@ -1287,7 +1287,7 @@ static float clampf_solider(float x,
 float Solider_ADC_ToTemp(uint16_t adc_raw)
 {
     float temp =
-        ((float)adc_raw - 1200.0f) * 1.3f;
+        ((float)adc_raw - 1200.0f) * 1.4f;
 
     temp = clampf_solider(
         temp,

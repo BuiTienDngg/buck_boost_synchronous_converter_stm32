@@ -43,16 +43,16 @@
 /* Blue Pill PC13 onboard LED is active-low. */
 #define STATUS_LED_PORT                GPIOC
 #define STATUS_LED_PIN                 GPIO_PIN_13
-#define STATUS_LED_ACTIVE_STATE        GPIO_PIN_RESET
-#define STATUS_LED_IDLE_STATE          GPIO_PIN_SET
+#define STATUS_LED_ACTIVE_STATE        GPIO_PIN_SET
+#define STATUS_LED_IDLE_STATE          GPIO_PIN_RESET
 
 /* Optional old power-route / relay output. Set 1 if PB15 is still used. */
 #define SOLDER_ROUTE_ENABLE            1U
 #define SOLDER_ROUTE_PORT              GPIOB
 #define SOLDER_ROUTE_PIN               GPIO_PIN_15
 
-#define SOLDER_BB_VSET                 24.0f
-#define SOLDER_BB_ISET                 7.0f
+#define SOLDER_BB_VSET                 12.0f
+#define SOLDER_BB_ISET                 6.0f
 
 #define BTN_ACTIVE                     GPIO_PIN_RESET
 #define BTN_DEBOUNCE_MS                35U
@@ -2635,6 +2635,16 @@ void BBUI_Init(BBUI_Data_t *data,
          */
         ui->enable = 0U;
         ui->state = BBUI_STATE_OFF;
+				/*
+				 * Auto start Buck-Boost:
+				 *     Vout = 10 V
+				 *     Iout limit = 5 A
+				 */
+//				ui->vset = 10.0f;
+//				ui->iset = 5.0f;
+
+//				ui->enable = 1U;
+//				ui->state = BBUI_STATE_CV;
     }
 
     if(tim_v != NULL)

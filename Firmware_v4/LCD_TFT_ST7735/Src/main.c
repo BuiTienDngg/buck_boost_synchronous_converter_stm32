@@ -1046,6 +1046,10 @@ int main(void)
   MX_TIM4_Init();
   /* USER CODE BEGIN 2 */
 	Buck_UI_Init();
+	/* Temporary fixed-output mode: start automatically at 10 V / 5 A. */
+	PowerStage.vset = 10.0f;
+	PowerStage.iset = 5.0f;
+	PowerStage.enable = 1U;
 	PowerStage_Start();
 //	HAL_TIMEx_PWMN_Shtim1tart(&htim1, TIM_CHANNEL_3);
 //	TIM1 -> CCR3 = 100;

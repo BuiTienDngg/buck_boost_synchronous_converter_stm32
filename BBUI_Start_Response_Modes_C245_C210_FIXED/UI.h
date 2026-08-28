@@ -29,12 +29,6 @@ typedef enum
     BB_RESPONSE_SLOW
 } BBUI_ResponseMode_t;
 
-typedef enum
-{
-    BB_CONTROL_CLOSED = 0,
-    BB_CONTROL_OPEN
-} BBUI_ControlMode_t;
-
 typedef struct
 {
     float voltage;
@@ -62,16 +56,6 @@ typedef struct
     float max_input_power;
     BBUI_StartMode_t start_mode;
     BBUI_ResponseMode_t response_mode;
-
-    /*
-     * CLOSED:
-     *   normal CV/CC control.
-     *
-     * OPEN:
-     *   VSET encoder directly controls openloop_ratio.
-     */
-    BBUI_ControlMode_t control_mode;
-    float openloop_ratio;
 
     BBUI_Preset_t preset[3];
 } BBUI_Data_t;

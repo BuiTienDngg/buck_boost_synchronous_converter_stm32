@@ -52,7 +52,7 @@
 #define SOLDER_ROUTE_PIN               GPIO_PIN_15
 
 #define SOLDER_C245_BB_VSET            18.0f
-#define SOLDER_C245_BB_ISET             5.0f
+#define SOLDER_C245_BB_ISET             6.0f
 #define SOLDER_C210_BB_VSET            12.0f
 #define SOLDER_C210_BB_ISET             5.0f
 
@@ -109,7 +109,6 @@ static UITheme_t menu_theme = UI_THEME_DARK;
 static SolderTip_t menu_solder_tip = SOLDER_TIP_C245;
 static BBUI_StartMode_t menu_start_mode = BB_START_SOFT;
 static BBUI_ResponseMode_t menu_response_mode = BB_RESPONSE_NORMAL;
-static BBUI_ControlMode_t menu_control_mode = BB_CONTROL_CLOSED;
 
 /*
  * Restored from Flash before the UI menu is used.
@@ -117,8 +116,6 @@ static BBUI_ControlMode_t menu_control_mode = BB_CONTROL_CLOSED;
  */
 static BBUI_StartMode_t flash_start_mode = BB_START_SOFT;
 static BBUI_ResponseMode_t flash_response_mode = BB_RESPONSE_NORMAL;
-static BBUI_ControlMode_t flash_control_mode = BB_CONTROL_CLOSED;
-static float flash_openloop_ratio = 0.50f;
 
 
 /*
@@ -306,12 +303,6 @@ static void buzzer_task(void)
 }
 
 
-/*
- * Forward declaration.
- * ui_flash_save() below uses clampf_ui() before its full definition.
- */
-static float clampf_ui(float x, float lo, float hi);
-
 /* =========================================================
  * FLASH MEMORY - SAVE VSET / ISET + PROTECTION
  *
@@ -333,8 +324,7 @@ static float clampf_ui(float x, float lo, float hi);
 #define UI_FLASH_VERSION_V2             0x00010002U
 #define UI_FLASH_VERSION_V3             0x00010003U
 #define UI_FLASH_VERSION_V4             0x00010004U
-#define UI_FLASH_VERSION_V5             0x00010005U
-#define UI_FLASH_VERSION                0x00010006U
+#define UI_FLASH_VERSION                0x00010005U
 
 typedef struct
 {
@@ -404,32 +394,6 @@ typedef struct
     uint32_t start_mode;
     uint32_t response_mode;
     uint32_t checksum;
-} UIFlashDataV5_t;
-
-typedef struct
-{
-    uint32_t magic;
-    uint32_t version;
-
-    uint32_t vset_x100;
-    uint32_t iset_x100;
-
-    uint32_t ovp_x100;
-    uint32_t ocp_x100;
-    uint32_t opp_x10;
-
-    uint32_t sleep_temp_x10;
-    uint32_t buzzer_button_enable;
-    uint32_t theme;
-    uint32_t solder_tip;
-
-    uint32_t start_mode;
-    uint32_t response_mode;
-
-    uint32_t control_mode;
-    uint32_t openloop_ratio_x100;
-
-    uint32_t checksum;
 } UIFlashData_t;
 
 static uint32_t ui_flash_checksum_v1(const UIFlashDataV1_t *d)
@@ -458,28 +422,12 @@ static uint32_t ui_flash_checksum_v4(const UIFlashDataV4_t *d)
            0x5A5AA5A5U;
 }
 
-static uint32_t ui_flash_checksum_v5(const UIFlashDataV5_t *d)
+static uint32_t ui_flash_checksum(const UIFlashData_t *d)
 {
     return d->magic ^ d->version ^ d->vset_x100 ^ d->iset_x100 ^
            d->ovp_x100 ^ d->ocp_x100 ^ d->opp_x10 ^ d->sleep_temp_x10 ^
            d->buzzer_button_enable ^ d->theme ^ d->solder_tip ^
            d->start_mode ^ d->response_mode ^
-           0x5A5AA5A5U;
-}
-
-static uint32_t ui_flash_checksum(const UIFlashData_t *d)
-{
-    return d->magic ^ d->version ^
-           d->vset_x100 ^ d->iset_x100 ^
-           d->ovp_x100 ^ d->ocp_x100 ^ d->opp_x10 ^
-           d->sleep_temp_x10 ^
-           d->buzzer_button_enable ^
-           d->theme ^
-           d->solder_tip ^
-           d->start_mode ^
-           d->response_mode ^
-           d->control_mode ^
-           d->openloop_ratio_x100 ^
            0x5A5AA5A5U;
 }
 
@@ -490,8 +438,6 @@ static uint8_t ui_flash_read(float *vset, float *iset)
      */
     flash_start_mode = BB_START_SOFT;
     flash_response_mode = BB_RESPONSE_NORMAL;
-    flash_control_mode = BB_CONTROL_CLOSED;
-    flash_openloop_ratio = 0.50f;
 
     const uint32_t *raw = (const uint32_t *)UI_FLASH_PAGE_ADDR;
     if(raw[0] != UI_FLASH_MAGIC) return 0U;
@@ -584,67 +530,6 @@ static uint8_t ui_flash_read(float *vset, float *iset)
         return 1U;
     }
 
-    if(raw[1] == UI_FLASH_VERSION_V5)
-    {
-        const UIFlashDataV5_t *d =
-            (const UIFlashDataV5_t *)UI_FLASH_PAGE_ADDR;
-
-        if(d->checksum != ui_flash_checksum_v5(d))
-            return 0U;
-
-        float v=(float)d->vset_x100/100.0f;
-        float i=(float)d->iset_x100/100.0f;
-
-        float ovp=(float)d->ovp_x100/100.0f;
-        float ocp=(float)d->ocp_x100/100.0f;
-        float opp=(float)d->opp_x10/10.0f;
-        float sl=(float)d->sleep_temp_x10/10.0f;
-
-        if(v<VSET_MIN||v>VSET_MAX||
-           i<ISET_MIN||i>ISET_MAX||
-           ovp<PROTECT_OVP_MIN||ovp>PROTECT_OVP_MAX||
-           ocp<PROTECT_OCP_MIN||ocp>PROTECT_OCP_MAX||
-           opp<PROTECT_OPP_MIN||opp>PROTECT_OPP_MAX||
-           sl<SLEEP_TEMP_MIN||sl>SLEEP_TEMP_MAX||
-           d->buzzer_button_enable>1U||
-           d->theme>(uint32_t)UI_THEME_LIGHT||
-           d->solder_tip>(uint32_t)SOLDER_TIP_C210||
-           d->start_mode>(uint32_t)BB_START_HARD||
-           d->response_mode>(uint32_t)BB_RESPONSE_SLOW)
-        {
-            return 0U;
-        }
-
-        *vset=v;
-        *iset=i;
-
-        protect_ovp=ovp;
-        protect_ocp=ocp;
-        protect_opp=opp;
-
-        sleep_temp=sl;
-        buzzer_button_enable=(uint8_t)d->buzzer_button_enable;
-        ui_theme=(UITheme_t)d->theme;
-        solder_tip=(SolderTip_t)d->solder_tip;
-
-        flash_start_mode =
-            (BBUI_StartMode_t)d->start_mode;
-
-        flash_response_mode =
-            (BBUI_ResponseMode_t)d->response_mode;
-
-        /*
-         * V5 did not have OPEN LOOP.
-         */
-        flash_control_mode =
-            BB_CONTROL_CLOSED;
-
-        flash_openloop_ratio =
-            0.50f;
-
-        return 1U;
-    }
-
     if(raw[1] != UI_FLASH_VERSION) return 0U;
     const UIFlashData_t *d=(const UIFlashData_t *)UI_FLASH_PAGE_ADDR;
     if(d->checksum != ui_flash_checksum(d)) return 0U;
@@ -660,9 +545,7 @@ static uint8_t ui_flash_read(float *vset, float *iset)
        d->theme>(uint32_t)UI_THEME_LIGHT||
        d->solder_tip>(uint32_t)SOLDER_TIP_C210||
        d->start_mode>(uint32_t)BB_START_HARD||
-       d->response_mode>(uint32_t)BB_RESPONSE_SLOW||
-       d->control_mode>(uint32_t)BB_CONTROL_OPEN||
-       d->openloop_ratio_x100>99U) return 0U;
+       d->response_mode>(uint32_t)BB_RESPONSE_SLOW) return 0U;
 
     *vset=v;
     *iset=i;
@@ -676,18 +559,8 @@ static uint8_t ui_flash_read(float *vset, float *iset)
     ui_theme=(UITheme_t)d->theme;
     solder_tip=(SolderTip_t)d->solder_tip;
 
-    flash_start_mode =
-        (BBUI_StartMode_t)d->start_mode;
-
-    flash_response_mode =
-        (BBUI_ResponseMode_t)d->response_mode;
-
-    flash_control_mode =
-        (BBUI_ControlMode_t)d->control_mode;
-
-    flash_openloop_ratio =
-        (float)d->openloop_ratio_x100 /
-        100.0f;
+    flash_start_mode=(BBUI_StartMode_t)d->start_mode;
+    flash_response_mode=(BBUI_ResponseMode_t)d->response_mode;
 
     return 1U;
 }
@@ -713,30 +586,6 @@ static uint8_t ui_flash_save(float vset, float iset)
         ? (uint32_t)ui->response_mode
         : (uint32_t)BB_RESPONSE_NORMAL;
 
-    n.control_mode =
-        (ui != NULL)
-        ? (uint32_t)ui->control_mode
-        : (uint32_t)BB_CONTROL_CLOSED;
-
-    float ratio_to_save =
-        (ui != NULL)
-        ? ui->openloop_ratio
-        : 0.50f;
-
-    ratio_to_save =
-        clampf_ui(
-            ratio_to_save,
-            0.00f,
-            0.99f
-        );
-
-    n.openloop_ratio_x100 =
-        (uint32_t)(
-            ratio_to_save *
-            100.0f +
-            0.5f
-        );
-
     n.checksum=ui_flash_checksum(&n);
     const UIFlashData_t *o=(const UIFlashData_t *)UI_FLASH_PAGE_ADDR;
     if(o->magic==n.magic&&o->version==n.version&&o->vset_x100==n.vset_x100&&o->iset_x100==n.iset_x100&&
@@ -744,8 +593,6 @@ static uint8_t ui_flash_save(float vset, float iset)
        o->sleep_temp_x10==n.sleep_temp_x10&&o->buzzer_button_enable==n.buzzer_button_enable&&
        o->theme==n.theme&&o->solder_tip==n.solder_tip&&
        o->start_mode==n.start_mode&&o->response_mode==n.response_mode&&
-       o->control_mode==n.control_mode&&
-       o->openloop_ratio_x100==n.openloop_ratio_x100&&
        o->checksum==n.checksum) return 1U;
 
     HAL_FLASH_Unlock(); FLASH_EraseInitTypeDef e={0}; uint32_t pe=0U;
@@ -813,7 +660,6 @@ typedef enum
 typedef enum
 {
     MENU_ITEM_UI = 0,
-    MENU_ITEM_LOOP,
     MENU_ITEM_START,
     MENU_ITEM_SPEED,
     MENU_ITEM_OVP,
@@ -841,14 +687,6 @@ static UIMode_t solder_return_ui_mode = UI_MODE_NUMBER;
 static float solder_backup_vset = 12.0f;
 static float solder_backup_iset = 2.0f;
 static uint8_t solder_backup_enable = 0U;
-
-static BBUI_ControlMode_t
-solder_backup_control_mode =
-    BB_CONTROL_CLOSED;
-
-static float
-solder_backup_openloop_ratio =
-    0.50f;
 
 static GPIO_PinState sleep_raw_last = GPIO_PIN_SET;
 static GPIO_PinState sleep_stable = GPIO_PIN_SET;
@@ -1521,38 +1359,8 @@ static void draw_number_static(void)
     ST7789_PutString(286, 92,  "A", 2, C_CURR, C_BG);
     ST7789_PutString(286, 149, "W", 2, C_POWER, C_BG);
 
-    if(ui != NULL &&
-       ui->control_mode == BB_CONTROL_OPEN)
-    {
-        ST7789_PutString(
-            4,
-            210,
-            "RATIO",
-            2,
-            C_VOLT,
-            C_BG
-        );
-    }
-    else
-    {
-        ST7789_PutString(
-            4,
-            210,
-            "VSET",
-            2,
-            C_VOLT,
-            C_BG
-        );
-    }
-
-    ST7789_PutString(
-        164,
-        210,
-        "ISET",
-        2,
-        C_CURR,
-        C_BG
-    );
+    ST7789_PutString(4,   210, "VSET", 2, C_VOLT, C_BG);
+    ST7789_PutString(164, 210, "ISET", 2, C_CURR, C_BG);
 
     /* Runtime replaces CV/CC + ON/OFF. */
     ST7789_PutString(218, 170, "RUN", 1, C_MUTED, C_BG);
@@ -1673,23 +1481,8 @@ static void draw_set_value_at(uint8_t is_voltage,
     const uint16_t label_color =
         is_voltage ? C_VOLT : C_CURR;
 
-    uint8_t ratio_field =
-        (
-            is_voltage &&
-            ui->control_mode ==
-            BB_CONTROL_OPEN
-        )
-        ? 1U
-        : 0U;
-
     const float value =
-        ratio_field
-        ? ui->openloop_ratio
-        : (
-            is_voltage
-            ? ui->vset
-            : ui->iset
-          );
+        is_voltage ? ui->vset : ui->iset;
 
     const DigitMode_t mode =
         is_voltage ? v_digit : i_digit;
@@ -1718,34 +1511,10 @@ static void draw_set_value_at(uint8_t is_voltage,
         : 0U;
 
     uint8_t selected =
-        ratio_field
-        ? 3U
-        : selected_char_index(mode);
+        selected_char_index(mode);
 
     char buf[16];
-
-    if(ratio_field)
-    {
-        snprintf(
-            buf,
-            sizeof(buf),
-            "%.2f",
-            clampf_ui(
-                value,
-                0.00f,
-                0.99f
-            )
-        );
-    }
-    else
-    {
-        snprintf(
-            buf,
-            sizeof(buf),
-            "%05.2f",
-            value
-        );
-    }
+    snprintf(buf, sizeof(buf), "%05.2f", value);
 
     /*
      * One character cell at scale 2 = about 12 x 16 px.
@@ -1753,15 +1522,9 @@ static void draw_set_value_at(uint8_t is_voltage,
      * Compare every displayed digit with what is currently on screen.
      * Only changed cells are transferred over SPI.
      */
-    size_t value_len =
-        strlen(buf);
-
     for(uint8_t i = 0U; i < 5U; i++)
     {
-        char desired =
-            (i < value_len)
-            ? buf[i]
-            : '\0';
+        char desired = buf[i];
 
         /*
          * Blink OFF:
@@ -1815,17 +1578,14 @@ static void draw_set_value_at(uint8_t is_voltage,
      */
     if(!(*unit_drawn))
     {
-        if(!ratio_field)
-        {
-            ST7789_PutString(
-                (uint16_t)(base_x + 64U),
-                value_y,
-                is_voltage ? "V" : "A",
-                2,
-                label_color,
-                C_BG
-            );
-        }
+        ST7789_PutString(
+            (uint16_t)(base_x + 64U),
+            value_y,
+            is_voltage ? "V" : "A",
+            2,
+            label_color,
+            C_BG
+        );
 
         *unit_drawn = 1U;
     }
@@ -1881,14 +1641,7 @@ static void draw_set_value_at(uint8_t is_voltage,
 static void draw_number_set_field(uint8_t is_voltage)
 {
     const uint16_t base_x =
-        is_voltage
-        ? (
-            (ui != NULL &&
-             ui->control_mode == BB_CONTROL_OPEN)
-            ? 70U
-            : 55U
-          )
-        : 215U;
+        is_voltage ? 55U : 215U;
 
     draw_set_value_at(
         is_voltage,
@@ -2006,38 +1759,8 @@ static void draw_graph_static(void)
     /* Runtime replaces CV/CC + ON/OFF. */
     ST7789_PutString(218, 170, "RUN", 1, C_MUTED, C_BG);
 
-    if(ui != NULL &&
-       ui->control_mode == BB_CONTROL_OPEN)
-    {
-        ST7789_PutString(
-            4,
-            210,
-            "RATIO",
-            2,
-            C_VOLT,
-            C_BG
-        );
-    }
-    else
-    {
-        ST7789_PutString(
-            4,
-            210,
-            "VSET",
-            2,
-            C_VOLT,
-            C_BG
-        );
-    }
-
-    ST7789_PutString(
-        164,
-        210,
-        "ISET",
-        2,
-        C_CURR,
-        C_BG
-    );
+    ST7789_PutString(4,   210, "VSET", 2, C_VOLT, C_BG);
+    ST7789_PutString(164, 210, "ISET", 2, C_CURR, C_BG);
 
     graph_head = 0U;
     graph_has_last = 0U;
@@ -2095,14 +1818,7 @@ static void draw_graph_live_info(void)
 static void draw_graph_set_field(uint8_t is_voltage)
 {
     const uint16_t base_x =
-        is_voltage
-        ? (
-            (ui != NULL &&
-             ui->control_mode == BB_CONTROL_OPEN)
-            ? 70U
-            : 55U
-          )
-        : 215U;
+        is_voltage ? 55U : 215U;
 
     draw_set_value_at(
         is_voltage,
@@ -2190,13 +1906,6 @@ static const char *theme_text(UITheme_t t){return (t==UI_THEME_LIGHT)?"LIGHT":"D
 static const char *on_off_text(uint8_t on){return on?"ON":"OFF";}
 static const char *solder_tip_text(SolderTip_t tip){return (tip==SOLDER_TIP_C210)?"C210":"C245";}
 
-static const char *control_mode_text(BBUI_ControlMode_t mode)
-{
-    return (mode == BB_CONTROL_OPEN)
-           ? "OPEN"
-           : "CLOSED";
-}
-
 static const char *start_mode_text(BBUI_StartMode_t mode)
 {
     return (mode == BB_START_HARD) ? "HARD" : "SOFT";
@@ -2215,7 +1924,7 @@ static const char *response_mode_text(BBUI_ResponseMode_t mode)
 
 static void draw_menu_row(uint8_t row,const char *name,const char *value)
 {
-    uint16_t y=(uint16_t)(26U+row*17U);
+    uint16_t y=(uint16_t)(29U+row*18U);
     uint8_t sel=((uint8_t)menu_item==row)?1U:0U;
     uint16_t fg=sel?C_BG:C_WHITE, bg=sel?C_VOLT:C_BG;
     ST7789_DrawFilledRectangle(18,(uint16_t)(y-1U),284,17,bg);
@@ -2229,7 +1938,7 @@ static void draw_menu(void)
 
     ST7789_PutString(
         124,
-        1,
+        2,
         "MENU",
         2,
         C_WHITE,
@@ -2238,7 +1947,7 @@ static void draw_menu(void)
 
     ST7789_DrawFilledRectangle(
         12,
-        21,
+        22,
         296,
         1,
         C_GRID
@@ -2258,12 +1967,6 @@ static void draw_menu(void)
         MENU_ITEM_UI,
         "UI",
         ui_mode_text(menu_ui_mode)
-    );
-
-    draw_menu_row(
-        MENU_ITEM_LOOP,
-        "LOOP",
-        control_mode_text(menu_control_mode)
     );
 
     draw_menu_row(
@@ -2322,7 +2025,7 @@ static void draw_menu(void)
 
     ST7789_DrawFilledRectangle(
         10,
-        216,
+        211,
         300,
         1,
         C_GRID
@@ -2330,7 +2033,7 @@ static void draw_menu(void)
 
     ST7789_PutString(
         10,
-        222,
+        220,
         "V:ITEM I:VALUE OUT:OK",
         1,
         C_MUTED,
@@ -2390,7 +2093,6 @@ static void enter_menu(void)
 
     if(ui != NULL)
     {
-        menu_control_mode = ui->control_mode;
         menu_start_mode = ui->start_mode;
         menu_response_mode = ui->response_mode;
     }
@@ -2440,18 +2142,6 @@ static void enter_solder_mode(void)
     solder_backup_vset = ui->vset;
     solder_backup_iset = ui->iset;
     solder_backup_enable = ui->enable;
-
-    solder_backup_control_mode =
-        ui->control_mode;
-
-    solder_backup_openloop_ratio =
-        ui->openloop_ratio;
-
-    /*
-     * SOLDER always uses normal closed-loop regulation.
-     */
-    ui->control_mode =
-        BB_CONTROL_CLOSED;
 
     /*
      * Handpiece dependent BB supply:
@@ -2508,12 +2198,6 @@ static void exit_solder_mode(void)
     ui->vset = solder_backup_vset;
     ui->iset = solder_backup_iset;
     ui->enable = solder_backup_enable;
-
-    ui->control_mode =
-        solder_backup_control_mode;
-
-    ui->openloop_ratio =
-        solder_backup_openloop_ratio;
 
     if(ui->enable)
         ui->state = BBUI_STATE_CV;
@@ -2653,9 +2337,6 @@ static void out_button_task(void)
                     buzzer_button_enable = menu_buzzer_button_enable;
                     ui_theme = menu_theme;
                     solder_tip = menu_solder_tip;
-
-                    ui->control_mode =
-                        menu_control_mode;
 
                     ui->start_mode =
                         menu_start_mode;
@@ -2908,16 +2589,8 @@ static void vset_button_task(void)
             {
                 if(is_live_screen())
                 {
-                    if(ui->control_mode ==
-                       BB_CONTROL_CLOSED)
-                    {
-                        v_digit =
-                            digit_next(
-                                v_digit
-                            );
-
-                        activate_v_edit();
-                    }
+                    v_digit = digit_next(v_digit);
+                    activate_v_edit();
                 }
                 else if(screen == SCREEN_SOLDER)
                 {
@@ -3015,35 +2688,15 @@ static void encoder_task(void)
         {
             if(is_live_screen())
             {
-                if(ui->control_mode ==
-                   BB_CONTROL_OPEN)
+                if(apply_encoder_delta(
+                    &enc_v_acc,
+                    delta,
+                    &ui->vset,
+                    digit_step(v_digit),
+                    VSET_MIN,
+                    VSET_MAX))
                 {
-                    if(apply_encoder_delta(
-                        &enc_v_acc,
-                        delta,
-                        &ui->openloop_ratio,
-                        0.01f,
-                        0.00f,
-                        0.99f))
-                    {
-                        /*
-                         * RATIO always has fixed step = 0.01.
-                         */
-                        activate_v_edit();
-                    }
-                }
-                else
-                {
-                    if(apply_encoder_delta(
-                        &enc_v_acc,
-                        delta,
-                        &ui->vset,
-                        digit_step(v_digit),
-                        VSET_MIN,
-                        VSET_MAX))
-                    {
-                        activate_v_edit();
-                    }
+                    activate_v_edit();
                 }
             }
             else if(screen == SCREEN_SOLDER)
@@ -3138,13 +2791,6 @@ static void encoder_task(void)
                             (menu_ui_mode == UI_MODE_NUMBER)
                             ? UI_MODE_GRAPH
                             : UI_MODE_NUMBER;
-                    }
-                    else if(menu_item == MENU_ITEM_LOOP)
-                    {
-                        menu_control_mode =
-                            (menu_control_mode == BB_CONTROL_CLOSED)
-                            ? BB_CONTROL_OPEN
-                            : BB_CONTROL_CLOSED;
                     }
                     else if(menu_item == MENU_ITEM_START)
                     {
@@ -3406,12 +3052,6 @@ void BBUI_Init(BBUI_Data_t *data,
 
             ui->response_mode =
                 flash_response_mode;
-
-            ui->control_mode =
-                flash_control_mode;
-
-            ui->openloop_ratio =
-                flash_openloop_ratio;
         }
 
         ui->vset =
@@ -3433,20 +3073,6 @@ void BBUI_Init(BBUI_Data_t *data,
             ui->response_mode =
                 BB_RESPONSE_NORMAL;
         }
-
-        if(ui->control_mode != BB_CONTROL_CLOSED &&
-           ui->control_mode != BB_CONTROL_OPEN)
-        {
-            ui->control_mode =
-                BB_CONTROL_CLOSED;
-        }
-
-        ui->openloop_ratio =
-            clampf_ui(
-                ui->openloop_ratio,
-                0.00f,
-                0.99f
-            );
 
         /*
          * Always start with output OFF for safety.

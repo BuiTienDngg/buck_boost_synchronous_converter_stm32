@@ -105,7 +105,7 @@ static void MX_TIM4_Init(void);
  * ========================================================= */
 
 #define VSET_MIN                    1.0f
-#define VSET_MAX                    36.0f
+#define VSET_MAX                    30.0f
 #define VSET_STEP                   0.1f
 
 #define ISET_MIN                    0.1f
@@ -159,7 +159,7 @@ static void MX_TIM4_Init(void);
  * ========================================================= */
 
 #define CV_KP                       0.01f
-#define CV_KI                       3.2f
+#define CV_KI                       1.9f
 
 #define CC_KP                       0.01f
 #define CC_KI                       1.5f
@@ -332,9 +332,6 @@ BBUI_Data_t PowerStage =
     .start_mode = BB_START_SOFT,
     .response_mode = BB_RESPONSE_NORMAL,
 
-    .control_mode = BB_CONTROL_CLOSED,
-    .openloop_ratio = 0.50f,
-
     .preset =
     {
         {12.0f, 5.0f},
@@ -367,9 +364,6 @@ int adc_calib_offset = 0;
 
 static uint8_t PowerStage_pwm_running = 0U;
 static uint8_t power_prev_enable = 0U;
-
-static BBUI_ControlMode_t
-power_prev_control_mode = BB_CONTROL_CLOSED;
 
 static uint32_t power_start_tick = 0U;
 
@@ -642,57 +636,6 @@ void PowerStage_SetRatio(float ratio)
      * CH1 = ratio
      * CH2 = 1 - ratio
      */
-    TIM1->CCR1 = duty_buck;
-    TIM1->CCR2 = duty_boost;
-}
-
-
-/*
- * OPEN LOOP ratio setter.
- *
- * Unlike the closed-loop setter, this intentionally allows:
- *
- *     0.00 <= ratio <= 0.99
- *
- * for manual power-stage testing.
- *
- * Mapping remains:
- *
- *     CH1 = ratio
- *     CH2 = 1 - ratio
- */
-static void PowerStage_SetOpenLoopRatio(float ratio)
-{
-    ratio =
-        clampf(
-            ratio,
-            0.00f,
-            0.99f
-        );
-
-    PowerStage.openloop_ratio =
-        ratio;
-
-    uint32_t arr =
-        TIM1->ARR;
-
-    uint32_t ccr =
-        (uint32_t)(
-            ratio *
-            (float)arr
-        );
-
-    if(ccr > arr)
-        ccr = arr;
-
-    duty_buck =
-        (uint16_t)ccr;
-
-    duty_boost =
-        (uint16_t)(
-            arr - ccr
-        );
-
     TIM1->CCR1 = duty_buck;
     TIM1->CCR2 = duty_boost;
 }
@@ -1080,24 +1023,11 @@ static uint8_t PowerStage_Service_5kHz(void)
         PowerStage_InputDroopRuntimeReset();
 
         /*
-         * Prepare duty BEFORE enabling MOE.
-         *
-         * CLOSED -> closed-loop safe minimum ratio.
-         * OPEN   -> user's manual open-loop ratio.
+         * Prepare initial duty BEFORE enabling MOE.
          */
-        if(PowerStage.control_mode ==
-           BB_CONTROL_OPEN)
-        {
-            PowerStage_SetOpenLoopRatio(
-                PowerStage.openloop_ratio
-            );
-        }
-        else
-        {
-            PowerStage_SetRatio(
-                RATIO_MIN
-            );
-        }
+        PowerStage_SetRatio(
+            RATIO_MIN
+        );
 
         PowerStage_Start();
 
@@ -1403,71 +1333,13 @@ void HAL_TIM_PeriodElapsedCallback(
 
     /*
      * If output is OFF or protection has tripped,
-     * do not drive the power stage.
+     * do not run PI loops.
      */
     if(PowerStage_Service_5kHz() == 0U)
-    {
-        power_prev_control_mode =
-            PowerStage.control_mode;
-
         return;
-    }
 
     /*
-     * Reset PI states once when changing CLOSED <-> OPEN.
-     * This prevents stale integrators from being reused when
-     * returning to closed-loop operation.
-     */
-    if(power_prev_control_mode !=
-       PowerStage.control_mode)
-    {
-        PowerStage_CVCC_Reset();
-
-        power_prev_control_mode =
-            PowerStage.control_mode;
-    }
-
-    /*
-     * =====================================================
-     * OPEN LOOP
-     * =====================================================
-     *
-     * No CV PI.
-     * No CC PI.
-     *
-     * ADC measurement + software protection above remain active.
-     */
-    if(PowerStage.control_mode ==
-       BB_CONTROL_OPEN)
-    {
-        ratio_out =
-            clampf(
-                PowerStage.openloop_ratio,
-                0.00f,
-                0.99f
-            );
-
-        PowerStage.openloop_ratio =
-            ratio_out;
-
-        /*
-         * State is only retained for compatibility with the existing UI/
-         * protection code. OPEN LOOP itself does not run CV regulation.
-         */
-        PowerStage.state =
-            BBUI_STATE_CV;
-
-        PowerStage_SetOpenLoopRatio(
-            ratio_out
-        );
-
-        return;
-    }
-
-    /*
-     * =====================================================
-     * CLOSED LOOP
-     * =====================================================
+     * Run CV first when both loops are due.
      */
     if(run_cv != 0U)
     {

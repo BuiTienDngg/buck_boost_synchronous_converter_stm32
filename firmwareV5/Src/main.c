@@ -93,7 +93,7 @@ static void MX_TIM4_Init(void);
 #define TEMP_MAX_PROTECT            80.0f
 
 #define CURRENT_MAX                 10.0f
-#define I_HARD_LIMIT_A              8.5f
+#define I_HARD_LIMIT_A              18.5f
 #define POWER_START_BLANK_MS        200U
 
 #define CURRENT_GAIN                200.0f
@@ -105,7 +105,7 @@ static void MX_TIM4_Init(void);
  * ========================================================= */
 
 #define VSET_MIN                    1.0f
-#define VSET_MAX                    36.0f
+#define VSET_MAX                    30.0f
 #define VSET_STEP                   0.1f
 
 #define ISET_MIN                    0.1f
@@ -159,7 +159,7 @@ static void MX_TIM4_Init(void);
  * ========================================================= */
 
 #define CV_KP                       0.01f
-#define CV_KI                       3.2f
+#define CV_KI                       1.9f
 
 #define CC_KP                       0.01f
 #define CC_KI                       1.5f
@@ -366,6 +366,27 @@ int adc_calib_offset = 0;
  * ========================================================= */
 
 static uint8_t PowerStage_pwm_running = 0U;
+/*
+ * =========================================================
+ * POWER-STAGE FAULT CODE
+ *
+ * Exported to UI.c so the buzzer can identify faults that
+ * originate inside the 5-kHz power-stage controller.
+ *
+ * 0 = none
+ * 1 = VIN dropped while output was already running
+ * 2 = power-stage temperature fault
+ * 3 = hard-current fault
+ * ========================================================= */
+#define POWER_FAULT_NONE          0U
+#define POWER_FAULT_VIN_LOW       1U
+#define POWER_FAULT_TEMP          2U
+#define POWER_FAULT_HARD_CURRENT  3U
+
+volatile uint8_t g_power_fault_code =
+    POWER_FAULT_NONE;
+
+
 static uint8_t power_prev_enable = 0U;
 
 static BBUI_ControlMode_t
@@ -392,6 +413,85 @@ static float effective_iset = 0.0f;
  *   filtered current used by the 5 kHz CC controller.
  */
 static float current_fast = 0.0f;
+
+/*
+ * current_fast 3-sample moving average
+ *
+ * Used by the hard-current protection.
+ * Purpose:
+ *   - reject a single switching/ADC spike
+ *   - keep response much faster than the normal CC current filter
+ *
+ * At the 5-kHz power-control service rate, 3 samples correspond
+ * to roughly 0.4...0.6 ms of history.
+ */
+#define CURRENT_FAST_AVG_N  3U
+
+static float current_fast_buf[CURRENT_FAST_AVG_N] =
+{
+    0.0f, 0.0f, 0.0f
+};
+
+static float current_fast_sum = 0.0f;
+static uint8_t current_fast_index = 0U;
+static uint8_t current_fast_count = 0U;
+
+
+static float CurrentFast_Filter3(float sample)
+{
+    /*
+     * During the first three readings, average only the number
+     * of valid samples already received. This avoids averaging
+     * the first real current sample against two zeros.
+     */
+    if(current_fast_count <
+       CURRENT_FAST_AVG_N)
+    {
+        current_fast_buf[current_fast_index] =
+            sample;
+
+        current_fast_sum +=
+            sample;
+
+        current_fast_count++;
+
+        current_fast_index++;
+
+        if(current_fast_index >=
+           CURRENT_FAST_AVG_N)
+        {
+            current_fast_index =
+                0U;
+        }
+
+        return current_fast_sum /
+               (float)current_fast_count;
+    }
+
+    /*
+     * Normal 3-point moving average.
+     */
+    current_fast_sum -=
+        current_fast_buf[current_fast_index];
+
+    current_fast_buf[current_fast_index] =
+        sample;
+
+    current_fast_sum +=
+        sample;
+
+    current_fast_index++;
+
+    if(current_fast_index >=
+       CURRENT_FAST_AVG_N)
+    {
+        current_fast_index =
+            0U;
+    }
+
+    return current_fast_sum /
+           (float)CURRENT_FAST_AVG_N;
+}
 static float current_ctrl = 0.0f;
 static uint8_t current_ctrl_filter_init = 0U;
 
@@ -948,8 +1048,10 @@ static void PowerStage_UpdateMeasurements_5kHz(void)
      * Raw current is retained for hard protection.
      */
     current_fast =
-        Read_Current(
-            adc1_dma_buf[1]
+        CurrentFast_Filter3(
+            Read_Current(
+                adc1_dma_buf[1]
+            )
         );
 
     /*
@@ -1043,8 +1145,17 @@ static uint8_t PowerStage_Service_5kHz(void)
 
         power_prev_enable = 0U;
 
-        PowerStage.state =
-            BBUI_STATE_OFF;
+        /*
+         * Do not erase a latched FAULT on the next 5-kHz ISR.
+         * Previously FAULT survived for only about 200 us, so
+         * UI.c could miss the cause before sounding the buzzer.
+         */
+        if(PowerStage.state !=
+           BBUI_STATE_FAULT)
+        {
+            PowerStage.state =
+                BBUI_STATE_OFF;
+        }
 
         PowerStage_CVCC_Reset();
 
@@ -1057,8 +1168,27 @@ static uint8_t PowerStage_Service_5kHz(void)
     if(PowerStage.vin <
        VIN_MIN_PROTECT)
     {
-        PowerStage.state =
-            BBUI_STATE_OFF;
+        /*
+         * VIN is considered a FAULT only if the converter was
+         * already running. This avoids a false VIN alarm at boot
+         * before the ADC has produced a valid input-voltage sample.
+         */
+        if(power_prev_enable != 0U)
+        {
+            g_power_fault_code =
+                POWER_FAULT_VIN_LOW;
+
+            PowerStage.enable =
+                0U;
+
+            PowerStage.state =
+                BBUI_STATE_FAULT;
+        }
+        else
+        {
+            PowerStage.state =
+                BBUI_STATE_OFF;
+        }
 
         PowerStage_Stop();
 
@@ -1072,6 +1202,12 @@ static uint8_t PowerStage_Service_5kHz(void)
      */
     if(power_prev_enable == 0U)
     {
+        /*
+         * A new run starts with no stale power-stage fault code.
+         */
+        g_power_fault_code =
+            POWER_FAULT_NONE;
+
         power_start_tick =
             now;
 
@@ -1110,6 +1246,9 @@ static uint8_t PowerStage_Service_5kHz(void)
     if(PowerStage.temp >
        TEMP_MAX_PROTECT)
     {
+        g_power_fault_code =
+            POWER_FAULT_TEMP;
+
         PowerStage_CVCC_Reset();
 
         PowerStage.enable = 0U;
@@ -1136,6 +1275,9 @@ static uint8_t PowerStage_Service_5kHz(void)
         if(current_fast >
            I_HARD_LIMIT_A)
         {
+            g_power_fault_code =
+                POWER_FAULT_HARD_CURRENT;
+
             PowerStage_CVCC_Reset();
 
             PowerStage.enable = 0U;
@@ -1930,7 +2072,7 @@ static void MX_SPI1_Init(void)
   hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi1.Init.NSS = SPI_NSS_SOFT;
-  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_4;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_16;
   hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
@@ -2011,7 +2153,7 @@ static void MX_TIM1_Init(void)
   sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
   sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
   sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
-  sBreakDeadTimeConfig.DeadTime = 25;
+  sBreakDeadTimeConfig.DeadTime = 45;
   sBreakDeadTimeConfig.BreakState = TIM_BREAK_DISABLE;
   sBreakDeadTimeConfig.BreakPolarity = TIM_BREAKPOLARITY_HIGH;
   sBreakDeadTimeConfig.AutomaticOutput = TIM_AUTOMATICOUTPUT_DISABLE;
@@ -2095,7 +2237,18 @@ static void MX_TIM3_Init(void)
 
   /* USER CODE END TIM3_Init 1 */
   htim3.Instance = TIM3;
-  htim3.Init.Prescaler = 35;
+  /*
+   * Heater inner PWM:
+   *
+   * 72 MHz / (PSC+1) / (ARR+1)
+   * = 72 MHz / 3 / 1001
+   * ~= 23.98 kHz
+   *
+   * Faster than the 5-kHz BB control loop and above the
+   * audible range, so the BB stage sees a much smoother
+   * average solder load.
+   */
+  htim3.Init.Prescaler = 10;
   htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim3.Init.Period = 1000;
   htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
@@ -2240,10 +2393,17 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : PB11 */
+  /*Configure GPIO pin : PB11
+   *
+   * SOLDER holder/sleep input:
+   *   LOW  = iron in holder  -> SLEEP
+   *   HIGH = iron removed    -> WAKE
+   *
+   * Use internal PULLUP so the released/open state is never floating.
+   */
   GPIO_InitStruct.Pin = GPIO_PIN_11;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /*Configure GPIO pins : PB12 PB4 PB8 PB9 */

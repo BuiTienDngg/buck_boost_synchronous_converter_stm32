@@ -39,7 +39,7 @@
 #define SOL_SET_MAX                   450.0f
 #define SOL_SET_STEP                  5.0f
 
-#define SOL_LCD_MS                    150U
+#define SOL_LCD_MS                    200U
 
 
 /*
@@ -49,7 +49,12 @@
  */
 #define TARGET_BEEP_BAND_C               5.0f
 #define TARGET_BEEP_HOLD_MS              800U
-#define TARGET_BEEP_REARM_C              15.0f
+
+/*
+ * TARGET_REACHED is ONE-SHOT for each requested target.
+ * It is re-armed only when the user/system changes target,
+ * not when temperature oscillates during normal regulation.
+ */
 
 static uint8_t sol_theme_light = 0U;
 
@@ -83,60 +88,134 @@ static uint8_t sol_theme_light = 0U;
 #define SOL_PLOT_H                    (SOL_PLOT_Y1 - SOL_PLOT_Y0 + 1)
 
 /* =========================================================
- * SOLDER CONTROL - WORKING VERSION
+ * SOLDER CONTROL - C245 COMMERCIAL-STYLE BURST CONTROL
  *
- * The following control constants/state are kept from the old
- * station firmware that already controlled the soldering iron.
- * Only the TFT rendering has been ported to ST7789 320x240.
+ * Measured commercial waveform:
+ *
+ *   HEAT:
+ *       ON  = 45 ms
+ *       OFF =  5 ms
+ *       frame = 50 ms
+ *
+ *   HOLD:
+ *       ON  =  5 ms
+ *       OFF = 45 ms
+ *       frame = 50 ms
+ *
+ * Temperature is sampled only while the heater is OFF.
+ *
+ * NOTE ABOUT TIM3 CH2:
+ * Existing hardware uses inverted PWM polarity:
+ *
+ *     CCR = 1000 -> heater OFF
+ *     CCR -> 0    -> heater fully ON
+ *
+ * During the active burst window TIM3 produces fast PWM.
+ * During the sensing window the heater is forced completely OFF.
  * ========================================================= */
 
-#define SOLIDER_ADC_INDEX               2
+#define SOLIDER_ADC_INDEX                 2
 
-#define SOLIDER_PID_PERIOD_MS            20U
-#define SOLIDER_OFF_READ_DELAY_MS        8U
-#define SOLIDER_ADC_AVG_N                8U
+#define SOLIDER_FRAME_MS                 50U
 
-#define ALPHA_FIR                       0.25f
+#define SOLIDER_HEAT_ON_MS               45U
+#define SOLIDER_HEAT_OFF_MS               5U
+
+#define SOLIDER_HOLD_ON_MS                5U
+#define SOLIDER_HOLD_OFF_MS              45U
+
+#define SOLIDER_FULL_OFF_MS              50U
 
 /*
- * Heater PWM range.
+ * In the 5-ms OFF window of HEAT mode:
  *
- * IMPORTANT:
- * With an inverted/PWM2 style heater drive and ARR ~= 1000:
- *   CCR = 1000 -> OFF
- *   CCR = 200  -> about 80% maximum effective duty
- *
- * Therefore this value intentionally limits maximum heater power.
- * Set closer to 0 only after checking TIM3 CH2 polarity and heater current.
+ *   first 2 ms -> switching/sense settling
+ *   remaining  -> collect ADC samples
  */
-#define SOLIDER_CCR_MAX_POWER           50U
-#define SOLIDER_CCR_OFF                 1000U
+#define SOLIDER_ADC_SETTLE_MS              2U
+#define SOLIDER_ADC_MAX_SAMPLES            8U
 
-/* =========================================================
- * HEATER PWM
+/*
+ * Temperature filtering.
  *
- * STM32F103:
- *     TIMER   = TIM3
- *     CHANNEL = CH2
+ * One new temperature result is produced roughly once per 50-ms frame.
+ */
+#define ALPHA_FIR                         0.25f
+
+/*
+ * Hysteresis around target.
  *
- * All heater power writes go through this macro.
+ * HEAT -> HOLD when temperature reaches within 2 C of target.
+ * HOLD -> HEAT only after temperature falls 10 C below target.
+ *
+ * This prevents HEAT/HOLD chatter from ADC noise.
+ */
+#define SOLIDER_ENTER_HEAT_ERR_C          10.0f
+#define SOLIDER_ENTER_HOLD_ERR_C           2.0f
+
+/*
+ * If tip overshoots more than this, stop heating for a full frame.
+ * Heating resumes as HOLD after it cools back close to target.
+ */
+#define SOLIDER_OVER_TEMP_OFF_C            5.0f
+#define SOLIDER_OVER_TEMP_RECOVER_C        1.0f
+
+#define SOLIDER_TEMP_MIN_C                25.0f
+#define SOLIDER_TEMP_MAX_C               500.0f
+
+#define SOL_CURRENT_EMA_ALPHA             0.06f
+
+/*
+ * =========================================================
+ * INNER HEATER PWM
+ *
+ * Outer burst remains:
+ *
+ *   HEAT = 45 ms active / 5 ms OFF
+ *   HOLD =  5 ms active / 45 ms OFF
+ *
+ * During the ACTIVE portion, the heater is no longer driven
+ * continuously ON. TIM3 CH2 generates fast PWM.
+ *
+ * main.c configures TIM3 to about 24 kHz.
+ *
+ * Current hardware polarity:
+ *
+ *   CCR = ARR -> heater OFF
+ *   CCR = 0   -> heater 100 % ON
+ *
+ * Therefore:
+ *
+ *   CCR = ARR * (1 - heater_duty)
+ *
+ * Default target duty = 80 %.
+ *
+ * Each ACTIVE pulse begins at 35 % and ramps to 80 % during
+ * the first 2 ms. This reduces the abrupt load step on Cout,
+ * the buck-boost converter and the C245 heater.
  * ========================================================= */
-#define SOLIDER_PWM_CCR                 (TIM3->CCR2)
 
+#define SOLIDER_PWM_HEAT_DUTY             0.80f
+#define SOLIDER_PWM_HOLD_DUTY             0.80f
 
-#define SOLIDER_KP                      0.05f
-#define SOLIDER_KI                      0.05f
-#define SOLIDER_KD                      0.000f
+#define SOLIDER_PWM_START_DUTY            0.35f
+#define SOLIDER_PWM_RAMP_MS                2U
 
-#define SOLIDER_TEMP_MIN_C              25.0f
-#define SOLIDER_TEMP_MAX_C              500.0f
+#define SOLIDER_PWM_CCR                   (TIM3->CCR2)
 
-#define SOL_CURRENT_EMA_ALPHA           0.12f
 
 extern volatile uint8_t adc1_dma_ready;
 extern uint16_t adc1_dma_buf[];
 extern BBUI_Data_t PowerStage;
 
+
+/*
+ * Keep the old internal state names so the public API and
+ * sleep/enable code require minimal changes.
+ *
+ * RUN      = burst ON phase / frame start
+ * OFF_WAIT = burst OFF phase + ADC sensing
+ */
 typedef enum
 {
     SOLIDER_PID_IDLE = 0,
@@ -145,18 +224,39 @@ typedef enum
     SOLIDER_PID_READ_ADC
 } SoliderPID_State_t;
 
-static SoliderPID_State_t solider_pid_state = SOLIDER_PID_IDLE;
 
+typedef enum
+{
+    SOLIDER_BURST_HEAT = 0,   /* 45 ms ON / 5 ms OFF */
+    SOLIDER_BURST_HOLD,       /* 5 ms ON / 45 ms OFF */
+    SOLIDER_BURST_OFF         /* 0 ms ON / 50 ms OFF */
+} SoliderBurstMode_t;
+
+
+static SoliderPID_State_t
+solider_pid_state =
+    SOLIDER_PID_IDLE;
+
+static SoliderBurstMode_t
+solider_burst_mode =
+    SOLIDER_BURST_HEAT;
+
+
+/* phase timing */
 static uint32_t solider_pid_tick = 0U;
 static uint32_t solider_off_tick = 0U;
-static uint32_t solider_pid_compute_tick = 0U;
+static uint8_t solider_phase_started = 0U;
 
+static uint32_t solider_on_ms = SOLIDER_HEAT_ON_MS;
+static uint32_t solider_off_ms = SOLIDER_HEAT_OFF_MS;
+
+
+/* ADC sensing during OFF phase */
 static uint32_t solider_adc_sum = 0U;
 static uint16_t solider_adc_count = 0U;
 
-static float solider_pid_i = 0.0f;
-static float solider_pid_prev_err = 0.0f;
 
+/* current measurement during ON phase */
 static float solider_current_sum = 0.0f;
 static uint16_t solider_current_count = 0U;
 
@@ -164,22 +264,63 @@ static float solider_current_avg = 0.0f;
 static float solider_current_filtered = 0.0f;
 static uint8_t solider_current_filter_init = 0U;
 
+
+/* temperature */
+static uint8_t solider_temp_filter_init = 0U;
+
 volatile float solider_temp_raw = 0.0f;
+
+/*
+ * Retained for compatibility/debug:
+ *
+ * HEAT = 0.90
+ * HOLD = 0.10
+ * OFF  = 0.00
+ */
 volatile float solider_pid_power = 0.0f;
-volatile uint16_t solider_pwm_ccr = SOLIDER_CCR_OFF;
+volatile uint16_t solider_pwm_ccr = 1000U;
 
-volatile float measured_temp;
-volatile float frev_measured_temp;
-volatile float set_temp;
+volatile float measured_temp = 25.0f;
+volatile float frev_measured_temp = 25.0f;
+volatile float set_temp = 350.0f;
 
-static uint16_t ccr = SOLIDER_CCR_OFF;
-static float power_ = 0.0f;
 
-/* Forward declarations for control functions used by UI entry/task. */
-static float clampf_solider(float x, float min, float max);
-static void Solider_SetPower(float power);
+/* useful Keil Watch variables */
+volatile uint8_t solider_burst_debug = 0U;
+volatile uint32_t solider_debug_on_ms = 0U;
+volatile uint32_t solider_debug_off_ms = 0U;
+volatile float solider_debug_error = 0.0f;
+
+/*
+ * Actual inner PWM duty applied during the ACTIVE phase.
+ */
+volatile float solider_pwm_duty_debug = 0.0f;
+
+
+/* Forward declarations */
+static float clampf_solider(float x,
+                            float min,
+                            float max);
+
+static void Solider_SetPwmDuty(float duty);
+static float Solider_GetTargetPwmDuty(void);
+static void Solider_UpdatePwmRamp(uint32_t on_elapsed_ms);
+
+static void Solider_HeaterOn(void);
+static void Solider_HeaterOff(void);
+
 static void Solider_PID_Reset(void);
-static float Solider_PID_Compute(float set_temp_, float measured_temp_);
+
+static void Solider_SelectBurstMode(
+    float target_temp,
+    float tip_temp
+);
+
+static void Solider_StartFrame(void);
+
+static void Solider_FinishCurrentMeasurement(void);
+
+static void Solider_ProcessTemperatureMeasurement(void);
 
 /* =========================================================
  * INTERNAL
@@ -199,11 +340,18 @@ static uint32_t target_beep_tick = 0U;
 static uint8_t force_redraw = 1U;
 static uint8_t values_dirty = 1U;
 
-static uint16_t graph_head = 0U;
-static int16_t graph_last_x = -1;
-static int16_t graph_last_yt = -1;
-static int16_t graph_last_yi = -1;
-static uint8_t graph_has_last = 0U;
+/*
+ * Left-scrolling strip-chart history.
+ *
+ * New sample appears at the right edge.
+ * Previous samples move left by 2 pixels.
+ */
+#define SOL_GRAPH_SCROLL_STEP_PX       2U
+#define SOL_GRAPH_HISTORY_CAP          (((SOL_PLOT_W - 1U) / SOL_GRAPH_SCROLL_STEP_PX) + 1U)
+
+static int16_t graph_hist_t[SOL_GRAPH_HISTORY_CAP];
+static int16_t graph_hist_i[SOL_GRAPH_HISTORY_CAP];
+static uint16_t graph_hist_count = 0U;
 
 static uint8_t graph_new_sample = 0U;
 static uint32_t lcd_tick = 0U;
@@ -395,138 +543,272 @@ static void draw_text_diff(uint16_t x,
  * GRAPH
  * ========================================================= */
 
-static void graph_restore_grid_column(int x)
+static void graph_draw_grid_inside(void)
 {
-    int y1 = SOL_GRAPH_Y0 + SOL_GRAPH_H / 4;
-    int y2 = SOL_GRAPH_Y0 + SOL_GRAPH_H / 2;
-    int y3 = SOL_GRAPH_Y0 + 3 * SOL_GRAPH_H / 4;
+    for(uint8_t k = 1U; k < 4U; k++)
+    {
+        uint16_t y =
+            (uint16_t)(
+                SOL_GRAPH_Y0 +
+                (SOL_GRAPH_H * k) / 4U
+            );
 
-    ST7789_DrawPixel((uint16_t)x, (uint16_t)y1, SOL_GRID_COLOR);
-    ST7789_DrawPixel((uint16_t)x, (uint16_t)y2, SOL_GRID_COLOR);
-    ST7789_DrawPixel((uint16_t)x, (uint16_t)y3, SOL_GRID_COLOR);
+        for(uint16_t x = SOL_PLOT_X0;
+            x <= SOL_PLOT_X1;
+            x += 4U)
+        {
+            ST7789_DrawPixel(
+                x,
+                y,
+                SOL_GRID_COLOR
+            );
+        }
+    }
 }
 
-static void graph_clear_column(int x)
+
+/*
+ * Erase only the old curves instead of clearing the complete graph.
+ * This removes the visible blank frame that caused TFT flicker.
+ */
+static void graph_erase_history(void)
 {
-    if(x < SOL_PLOT_X0 || x > SOL_PLOT_X1)
+    if(graph_hist_count == 0U)
         return;
 
-    ST7789_DrawFilledRectangle((uint16_t)x,
-                               SOL_PLOT_Y0,
-                               1U,
-                               SOL_PLOT_H,
-                               SOL_BG);
+    int first_x =
+        SOL_PLOT_X1 -
+        (int)(
+            (graph_hist_count - 1U) *
+            SOL_GRAPH_SCROLL_STEP_PX
+        );
 
-    graph_restore_grid_column(x);
+    if(graph_hist_count == 1U)
+    {
+        ST7789_DrawPixel(
+            SOL_PLOT_X1,
+            (uint16_t)graph_hist_t[0],
+            SOL_BG
+        );
+
+        ST7789_DrawPixel(
+            SOL_PLOT_X1,
+            (uint16_t)graph_hist_i[0],
+            SOL_BG
+        );
+
+        return;
+    }
+
+    for(uint16_t n = 1U;
+        n < graph_hist_count;
+        n++)
+    {
+        int x0 =
+            first_x +
+            (int)(
+                (n - 1U) *
+                SOL_GRAPH_SCROLL_STEP_PX
+            );
+
+        int x1 =
+            first_x +
+            (int)(
+                n *
+                SOL_GRAPH_SCROLL_STEP_PX
+            );
+
+        draw_line_fast(
+            x0,
+            graph_hist_t[n - 1U],
+            x1,
+            graph_hist_t[n],
+            SOL_BG
+        );
+
+        draw_line_fast(
+            x0,
+            graph_hist_i[n - 1U],
+            x1,
+            graph_hist_i[n],
+            SOL_BG
+        );
+    }
 }
+
 
 static void draw_graph_static(void)
 {
     /* legend */
-    ST7789_PutString(7, 3,
-                     "T 0-500C",
-                     1,
-                     SOL_TEMP_COLOR,
-                     SOL_BG);
+    ST7789_PutString(
+        7,
+        3,
+        "T 0-500C",
+        1,
+        SOL_TEMP_COLOR,
+        SOL_BG
+    );
 
-    ST7789_PutString(102, 3,
-                     "I 0-10A",
-                     1,
-                     SOL_CURR_COLOR,
-                     SOL_BG);
+    ST7789_PutString(
+        102,
+        3,
+        "I 0-10A",
+        1,
+        SOL_CURR_COLOR,
+        SOL_BG
+    );
 
-    ST7789_PutString(258, 3,
-                     "SOLDER",
-                     1,
-                     ST7789_COLOR_YELLOW,
-                     SOL_BG);
+    ST7789_PutString(
+        258,
+        3,
+        "SOLDER",
+        1,
+        ST7789_COLOR_YELLOW,
+        SOL_BG
+    );
 
     /* border */
-    draw_rect_outline(SOL_GRAPH_X0,
-                      SOL_GRAPH_Y0,
-                      SOL_GRAPH_W,
-                      SOL_GRAPH_H,
-                      SOL_TEXT_COLOR);
+    draw_rect_outline(
+        SOL_GRAPH_X0,
+        SOL_GRAPH_Y0,
+        SOL_GRAPH_W,
+        SOL_GRAPH_H,
+        SOL_TEXT_COLOR
+    );
 
-    /* dotted horizontal grid */
-    for(uint8_t k = 1U; k < 4U; k++)
+    graph_draw_grid_inside();
+
+    graph_hist_count =
+        0U;
+}
+
+
+static void graph_render_history(void)
+{
+    if(graph_hist_count == 0U)
+        return;
+
+    int first_x =
+        SOL_PLOT_X1 -
+        (int)(
+            (graph_hist_count - 1U) *
+            SOL_GRAPH_SCROLL_STEP_PX
+        );
+
+    for(uint16_t n = 1U;
+        n < graph_hist_count;
+        n++)
     {
-        uint16_t y =
-            (uint16_t)(SOL_GRAPH_Y0 +
-                       (SOL_GRAPH_H * k) / 4U);
+        int x0 =
+            first_x +
+            (int)(
+                (n - 1U) *
+                SOL_GRAPH_SCROLL_STEP_PX
+            );
 
-        for(uint16_t x = SOL_GRAPH_X0 + 1U;
-            x < SOL_GRAPH_X1;
-            x += 4U)
-        {
-            ST7789_DrawPixel(x, y, SOL_GRID_COLOR);
-        }
+        int x1 =
+            first_x +
+            (int)(
+                n *
+                SOL_GRAPH_SCROLL_STEP_PX
+            );
+
+        draw_line_fast(
+            x0,
+            graph_hist_t[n - 1U],
+            x1,
+            graph_hist_t[n],
+            SOL_TEMP_COLOR
+        );
+
+        draw_line_fast(
+            x0,
+            graph_hist_i[n - 1U],
+            x1,
+            graph_hist_i[n],
+            SOL_CURR_COLOR
+        );
     }
 
-    graph_head = 0U;
-    graph_last_x = -1;
-    graph_last_yt = -1;
-    graph_last_yi = -1;
-    graph_has_last = 0U;
+    if(graph_hist_count == 1U)
+    {
+        ST7789_DrawPixel(
+            SOL_PLOT_X1,
+            (uint16_t)graph_hist_t[0],
+            SOL_TEMP_COLOR
+        );
 
+        ST7789_DrawPixel(
+            SOL_PLOT_X1,
+            (uint16_t)graph_hist_i[0],
+            SOL_CURR_COLOR
+        );
+    }
 }
+
 
 static void graph_push(float temp,
                        float current)
 {
-    int x = SOL_PLOT_X0 + (int)graph_head;
+    int yt =
+        map_y(
+            temp,
+            SOL_TEMP_MIN,
+            SOL_TEMP_MAX
+        );
 
-    int yt = map_y(temp,
-                   SOL_TEMP_MIN,
-                   SOL_TEMP_MAX);
+    int yi =
+        map_y(
+            current,
+            SOL_CURR_MIN,
+            SOL_CURR_MAX
+        );
 
-    int yi = map_y(current,
-                   SOL_CURR_MIN,
-                   SOL_CURR_MAX);
+    /*
+     * Remove only the currently visible curves.
+     * Do NOT FillRectangle() the complete plot.
+     */
+    graph_erase_history();
 
-    graph_clear_column(x);
-
-    if(x + 1 <= SOL_PLOT_X1)
-        graph_clear_column(x + 1);
-
-    if(graph_has_last && x > graph_last_x)
+    if(graph_hist_count <
+       SOL_GRAPH_HISTORY_CAP)
     {
-        draw_line_fast(graph_last_x,
-                       graph_last_yt,
-                       x,
-                       yt,
-                       SOL_TEMP_COLOR);
+        graph_hist_t[graph_hist_count] =
+            (int16_t)yt;
 
-        draw_line_fast(graph_last_x,
-                       graph_last_yi,
-                       x,
-                       yi,
-                       SOL_CURR_COLOR);
+        graph_hist_i[graph_hist_count] =
+            (int16_t)yi;
+
+        graph_hist_count++;
     }
     else
     {
-        ST7789_DrawPixel((uint16_t)x,
-                         (uint16_t)yt,
-                         SOL_TEMP_COLOR);
+        for(uint16_t n = 1U;
+            n < SOL_GRAPH_HISTORY_CAP;
+            n++)
+        {
+            graph_hist_t[n - 1U] =
+                graph_hist_t[n];
 
-        ST7789_DrawPixel((uint16_t)x,
-                         (uint16_t)yi,
-                         SOL_CURR_COLOR);
+            graph_hist_i[n - 1U] =
+                graph_hist_i[n];
+        }
+
+        graph_hist_t[SOL_GRAPH_HISTORY_CAP - 1U] =
+            (int16_t)yt;
+
+        graph_hist_i[SOL_GRAPH_HISTORY_CAP - 1U] =
+            (int16_t)yi;
     }
 
-    graph_last_x = (int16_t)x;
-    graph_last_yt = (int16_t)yt;
-    graph_last_yi = (int16_t)yi;
-    graph_has_last = 1U;
+    /*
+     * Curves may have erased some dotted grid pixels.
+     */
+    graph_draw_grid_inside();
 
-    graph_head++;
-
-    if(graph_head >= SOL_PLOT_W)
-    {
-        graph_head = 0U;
-        graph_has_last = 0U;
-    }
+    graph_render_history();
 }
+
 
 static void graph_task(void)
 {
@@ -745,45 +1027,79 @@ static void target_beep_task(void)
     if(!sol_active)
         return;
 
-    float target = UI_Solider_GetSetTemp();
-    float err = sol.tip_temp - target;
+    /*
+     * Once TARGET_REACHED has fired, stay disarmed until
+     * target_beep_reset() is explicitly called by:
+     *
+     *   - entering SOLDER
+     *   - entering/leaving SLEEP
+     *   - changing preset
+     *   - changing set temperature with encoder
+     *
+     * Normal temperature oscillation must NOT re-arm the beep.
+     */
+    if(!target_beep_armed)
+        return;
+
+    float target =
+        UI_Solider_GetSetTemp();
+
+    float err =
+        sol.tip_temp -
+        target;
 
     if(err < 0.0f)
         err = -err;
 
-    if(err >= TARGET_BEEP_REARM_C)
-    {
-        target_beep_armed = 1U;
-        target_beep_in_band = 0U;
-        return;
-    }
-
-    if(!target_beep_armed)
-        return;
-
     if(err <= TARGET_BEEP_BAND_C)
     {
-        uint32_t now = HAL_GetTick();
+        uint32_t now =
+            HAL_GetTick();
 
         if(!target_beep_in_band)
         {
-            target_beep_in_band = 1U;
-            target_beep_tick = now;
+            target_beep_in_band =
+                1U;
+
+            target_beep_tick =
+                now;
+
             return;
         }
 
-        if((uint32_t)(now - target_beep_tick) >= TARGET_BEEP_HOLD_MS)
+        /*
+         * Require the temperature to remain inside the band
+         * continuously before announcing TARGET_REACHED.
+         */
+        if((uint32_t)(
+               now -
+               target_beep_tick
+           ) >=
+           TARGET_BEEP_HOLD_MS)
         {
-            target_beep_armed = 0U;
-            target_beep_in_band = 0U;
-            solder_event_set(UI_SOLDER_EVENT_TARGET_REACHED);
+            target_beep_armed =
+                0U;
+
+            target_beep_in_band =
+                0U;
+
+            solder_event_set(
+                UI_SOLDER_EVENT_TARGET_REACHED
+            );
         }
     }
     else
     {
-        target_beep_in_band = 0U;
+        /*
+         * Not yet stable at target.
+         * Restart only the in-band hold timer.
+         * Do NOT re-arm after a completed target beep.
+         */
+        target_beep_in_band =
+            0U;
     }
 }
+
 
 
 /* =========================================================
@@ -935,8 +1251,7 @@ void UI_Solider_Init(void)
     force_redraw = 1U;
     values_dirty = 1U;
 
-    graph_head = 0U;
-    graph_has_last = 0U;
+    graph_hist_count = 0U;
     graph_new_sample = 0U;
 
     lcd_tick = HAL_GetTick();
@@ -954,20 +1269,23 @@ void UI_Solider_Enter(void)
     force_redraw = 1U;
     values_dirty = 1U;
 
-    graph_head = 0U;
-    graph_has_last = 0U;
-
-    graph_last_x = -1;
-    graph_last_yt = -1;
-    graph_last_yi = -1;
-
+    graph_hist_count = 0U;
     graph_new_sample = 0U;
 
     lcd_tick = HAL_GetTick();
 
     clear_caches();
 
-    /* Start the same proven heater-control state machine. */
+    /*
+     * New SOLDER session:
+     * discard any old temperature-filter history.
+     * Sleep/wake transitions do NOT clear this history.
+     */
+    solider_temp_filter_init = 0U;
+    measured_temp = 25.0f;
+    frev_measured_temp = 25.0f;
+
+    /* Start 50-ms C245 burst controller. */
     Solider_PID_Enable(1U);
 }
 
@@ -1099,7 +1417,14 @@ void UI_Solider_SetPreset(uint8_t id,
     sol.preset[id] = temp;
 
     if(sol.active_preset == id)
+    {
         sol.set_temp = temp;
+
+        /*
+         * A new active target deserves one new TARGET_REACHED beep.
+         */
+        target_beep_reset();
+    }
 
     values_dirty = 1U;
 }
@@ -1114,6 +1439,8 @@ void UI_Solider_SelectPreset(uint8_t id)
 
     sol.active_preset = id;
     sol.set_temp = sol.preset[id];
+
+    target_beep_reset();
 
     values_dirty = 1U;
 }
@@ -1140,6 +1467,11 @@ void UI_Solider_EncoderAdjust(int8_t dir)
      */
     sol.preset[sol.active_preset] =
         sol.set_temp;
+
+    /*
+     * New requested temperature -> allow one new reached-target beep.
+     */
+    target_beep_reset();
 
     values_dirty = 1U;
 }
@@ -1265,323 +1597,769 @@ float Solider_ADC_ToTemp(uint16_t adc_raw)
 }
 
 /* =========================================================
- * HEATER POWER
- *
- * Preserved mapping:
- *     power = 1.0 -> CCR = 200  : maximum heat
- *     power = 0.0 -> CCR = 1000 : heater OFF
+ * HEATER OUTPUT - FAST INNER PWM
  * ========================================================= */
 
-static void Solider_SetPower(float power)
+static void Solider_SetPwmDuty(float duty)
 {
-    power = clampf_solider(power, 0.0f, 1.0f);
+    duty =
+        clampf_solider(
+            duty,
+            0.0f,
+            1.0f
+        );
 
-    ccr = (uint16_t)(
-        SOLIDER_CCR_OFF -
-        power *
-        (float)(SOLIDER_CCR_OFF - SOLIDER_CCR_MAX_POWER)
-    );
+    uint32_t arr =
+        TIM3->ARR;
 
-    if(ccr > SOLIDER_CCR_OFF)
-        ccr = SOLIDER_CCR_OFF;
+    /*
+     * Inverted heater polarity:
+     *
+     * duty=0.0 -> CCR=ARR -> heater OFF
+     * duty=1.0 -> CCR=0   -> heater continuously ON
+     */
+    uint32_t ccr =
+        (uint32_t)(
+            (1.0f - duty) *
+            (float)arr
+        );
 
-    if(ccr < SOLIDER_CCR_MAX_POWER)
-        ccr = SOLIDER_CCR_MAX_POWER;
+    if(ccr > arr)
+        ccr = arr;
 
-    SOLIDER_PWM_CCR = ccr;
+    SOLIDER_PWM_CCR =
+        ccr;
 
-    solider_pid_power = power;
-    solider_pwm_ccr = ccr;
+    solider_pwm_ccr =
+        (uint16_t)ccr;
+
+    solider_pwm_duty_debug =
+        duty;
 }
+
+
+static float Solider_GetTargetPwmDuty(void)
+{
+    if(solider_burst_mode ==
+       SOLIDER_BURST_HOLD)
+    {
+        return SOLIDER_PWM_HOLD_DUTY;
+    }
+
+    if(solider_burst_mode ==
+       SOLIDER_BURST_HEAT)
+    {
+        return SOLIDER_PWM_HEAT_DUTY;
+    }
+
+    return 0.0f;
+}
+
+
+static void Solider_UpdatePwmRamp(uint32_t on_elapsed_ms)
+{
+    float target =
+        Solider_GetTargetPwmDuty();
+
+    if(target <= 0.0f)
+    {
+        Solider_SetPwmDuty(
+            0.0f
+        );
+
+        return;
+    }
+
+    if((SOLIDER_PWM_RAMP_MS == 0U) ||
+       (on_elapsed_ms >=
+        SOLIDER_PWM_RAMP_MS))
+    {
+        Solider_SetPwmDuty(
+            target
+        );
+
+        return;
+    }
+
+    /*
+     * Linear 35 % -> target duty during the first 2 ms.
+     */
+    float k =
+        (float)on_elapsed_ms /
+        (float)SOLIDER_PWM_RAMP_MS;
+
+    float duty =
+        SOLIDER_PWM_START_DUTY +
+        (
+            target -
+            SOLIDER_PWM_START_DUTY
+        ) *
+        k;
+
+    Solider_SetPwmDuty(
+        duty
+    );
+}
+
+
+static void Solider_HeaterOn(void)
+{
+    /*
+     * Start each ACTIVE burst softly rather than applying
+     * the final PWM duty immediately.
+     */
+    Solider_SetPwmDuty(
+        SOLIDER_PWM_START_DUTY
+    );
+}
+
+
+static void Solider_HeaterOff(void)
+{
+    Solider_SetPwmDuty(
+        0.0f
+    );
+}
+
+
+/* =========================================================
+ * CONTROLLER RESET / ENABLE
+ * ========================================================= */
 
 static void Solider_PID_Reset(void)
 {
-    solider_pid_i = 0.0f;
-    solider_pid_prev_err = 0.0f;
-    solider_pid_compute_tick = 0U;
+    Solider_HeaterOff();
 
-    solider_adc_sum = 0U;
-    solider_adc_count = 0U;
+    solider_pid_state =
+        SOLIDER_PID_IDLE;
 
-    solider_pid_power = 0.0f;
-    solider_pwm_ccr = SOLIDER_CCR_OFF;
+    solider_burst_mode =
+        SOLIDER_BURST_HEAT;
 
-    solider_current_sum = 0.0f;
-    solider_current_count = 0U;
-    solider_current_avg = 0.0f;
+    solider_phase_started =
+        0U;
 
-    solider_current_filtered = 0.0f;
-    solider_current_filter_init = 0U;
+    solider_pid_tick =
+        HAL_GetTick();
 
-    SOLIDER_PWM_CCR = SOLIDER_CCR_OFF;
+    solider_off_tick =
+        HAL_GetTick();
+
+    solider_on_ms =
+        SOLIDER_HEAT_ON_MS;
+
+    solider_off_ms =
+        SOLIDER_HEAT_OFF_MS;
+
+    solider_adc_sum =
+        0U;
+
+    solider_adc_count =
+        0U;
+
+    solider_current_sum =
+        0.0f;
+
+    solider_current_count =
+        0U;
+
+    solider_current_avg =
+        0.0f;
+
+    /*
+     * Keep the current EMA history if available.
+     * It makes sleep/wake transitions smoother.
+     */
+
+    solider_pid_power =
+        0.0f;
+
+    solider_pwm_duty_debug =
+        0.0f;
+
+    solider_burst_debug =
+        (uint8_t)SOLIDER_BURST_HEAT;
+
+    solider_debug_on_ms =
+        SOLIDER_HEAT_ON_MS;
+
+    solider_debug_off_ms =
+        SOLIDER_HEAT_OFF_MS;
+
+    solider_debug_error =
+        0.0f;
 }
+
 
 void Solider_PID_Enable(uint8_t enable)
 {
     if(enable)
     {
-        if(solider_pid_state == SOLIDER_PID_IDLE)
-        {
-            Solider_PID_Reset();
-            solider_pid_tick = HAL_GetTick();
-            solider_pid_state = SOLIDER_PID_RUN;
-        }
+        /*
+         * Reset timing/control, but keep latest valid tip
+         * temperature if this is only a sleep/wake transition.
+         */
+        Solider_PID_Reset();
+
+        solider_pid_tick =
+            HAL_GetTick();
+
+        solider_pid_state =
+            SOLIDER_PID_RUN;
+
+        solider_phase_started =
+            0U;
     }
     else
     {
-        solider_pid_state = SOLIDER_PID_IDLE;
         Solider_PID_Reset();
+
+        solider_pid_state =
+            SOLIDER_PID_IDLE;
     }
 }
 
-static float Solider_PID_Compute(float set_temp_,
-                                 float measured_temp_)
-{
-    uint32_t now = HAL_GetTick();
-
-    /*
-     * Use the real interval between valid temperature samples.
-     * With the faster loop this is typically around 60 ms, but
-     * ADC scheduling can make it vary slightly.
-     */
-    float dt = 0.060f;
-
-    if(solider_pid_compute_tick != 0U)
-    {
-        dt =
-            (float)(now - solider_pid_compute_tick) /
-            1000.0f;
-    }
-
-    solider_pid_compute_tick = now;
-
-    /*
-     * Clamp dt so a pause/debug breakpoint cannot create a huge
-     * integral or derivative kick.
-     */
-    if(dt < 0.020f)
-        dt = 0.020f;
-
-    if(dt > 0.200f)
-        dt = 0.200f;
-
-    float err = set_temp_ - measured_temp_;
-
-    float p =
-        SOLIDER_KP * err;
-
-    float d =
-        SOLIDER_KD *
-        (err - solider_pid_prev_err) /
-        dt;
-
-    float i_new =
-        solider_pid_i +
-        SOLIDER_KI * err * dt;
-
-    float out_unsat =
-        p + i_new + d;
-
-    if(!((out_unsat > 1.0f && err > 0.0f) ||
-         (out_unsat < 0.0f && err < 0.0f)))
-    {
-        solider_pid_i = i_new;
-    }
-
-    solider_pid_i =
-        clampf_solider(
-            solider_pid_i,
-            -0.5f,
-            1.0f
-        );
-
-    float out =
-        p + solider_pid_i + d;
-
-    out =
-        clampf_solider(
-            out,
-            0.0f,
-            1.0f
-        );
-
-    solider_pid_prev_err = err;
-
-    return out;
-}
 
 /* =========================================================
- * NON-BLOCKING SOLDER CONTROL STATE MACHINE
+ * BURST MODE DECISION
  *
- * RUN:
- *   - heater active according to previous PID output
- *   - accumulate current samples
- *   - every 50 ms turn heater OFF
+ * Commercial-like behavior:
  *
- * OFF_WAIT:
- *   - wait 8 ms for switching noise to settle
+ *   Far below set point:
+ *       HEAT = 45 ms ON / 5 ms OFF
  *
- * READ_ADC:
- *   - average 8 ADC samples
- *   - convert to temperature
- *   - FIR filter
- *   - PID compute
- *   - apply heater power
- *   - update TFT data
- *   - return RUN
+ *   Near / at set point:
+ *       HOLD = 5 ms ON / 45 ms OFF
+ *
+ *   Excessive overshoot:
+ *       OFF = 0 ms ON / 50 ms OFF
+ *
+ * Hysteresis:
+ *
+ *   HOLD -> HEAT:
+ *       error >= 10 C
+ *
+ *   HEAT -> HOLD:
+ *       error <= 2 C
+ *
+ * ========================================================= */
+
+static void Solider_SelectBurstMode(float target_temp,
+                                    float tip_temp)
+{
+    /*
+     * Until the first valid temperature sample arrives,
+     * start exactly like the commercial unit: HEAT.
+     */
+    if(solider_temp_filter_init == 0U)
+    {
+        solider_burst_mode =
+            SOLIDER_BURST_HEAT;
+
+        return;
+    }
+
+    float error =
+        target_temp -
+        tip_temp;
+
+    solider_debug_error =
+        error;
+
+    /*
+     * Strong overshoot:
+     * stop heating completely until temperature comes down.
+     */
+    if(tip_temp >
+       target_temp +
+       SOLIDER_OVER_TEMP_OFF_C)
+    {
+        solider_burst_mode =
+            SOLIDER_BURST_OFF;
+
+        return;
+    }
+
+    switch(solider_burst_mode)
+    {
+        case SOLIDER_BURST_HEAT:
+        {
+            /*
+             * Stay HIGH-power until almost at target.
+             */
+            if(error <=
+               SOLIDER_ENTER_HOLD_ERR_C)
+            {
+                solider_burst_mode =
+                    SOLIDER_BURST_HOLD;
+            }
+        }
+        break;
+
+        case SOLIDER_BURST_HOLD:
+        {
+            /*
+             * A real thermal load must pull the tip down
+             * substantially before full heating returns.
+             */
+            if(error >=
+               SOLIDER_ENTER_HEAT_ERR_C)
+            {
+                solider_burst_mode =
+                    SOLIDER_BURST_HEAT;
+            }
+        }
+        break;
+
+        case SOLIDER_BURST_OFF:
+        default:
+        {
+            /*
+             * After an overshoot, return to HOLD once the tip
+             * has cooled back close to target.
+             */
+            if(tip_temp <=
+               target_temp +
+               SOLIDER_OVER_TEMP_RECOVER_C)
+            {
+                if(error >=
+                   SOLIDER_ENTER_HEAT_ERR_C)
+                {
+                    solider_burst_mode =
+                        SOLIDER_BURST_HEAT;
+                }
+                else
+                {
+                    solider_burst_mode =
+                        SOLIDER_BURST_HOLD;
+                }
+            }
+        }
+        break;
+    }
+}
+
+
+/* =========================================================
+ * START A NEW 50-ms FRAME
+ * ========================================================= */
+
+static void Solider_StartFrame(void)
+{
+    set_temp =
+        UI_Solider_GetSetTemp();
+
+    Solider_SelectBurstMode(
+        set_temp,
+        measured_temp
+    );
+
+    switch(solider_burst_mode)
+    {
+        case SOLIDER_BURST_HEAT:
+        {
+            solider_on_ms =
+                SOLIDER_HEAT_ON_MS;
+
+            solider_off_ms =
+                SOLIDER_HEAT_OFF_MS;
+
+            /*
+             * Effective nominal frame duty:
+             * 90 % outer burst * 80 % inner PWM = 72 %.
+             */
+            solider_pid_power =
+                0.90f *
+                SOLIDER_PWM_HEAT_DUTY;
+        }
+        break;
+
+        case SOLIDER_BURST_HOLD:
+        {
+            solider_on_ms =
+                SOLIDER_HOLD_ON_MS;
+
+            solider_off_ms =
+                SOLIDER_HOLD_OFF_MS;
+
+            /*
+             * Effective nominal frame duty:
+             * 10 % outer burst * 80 % inner PWM = 8 %.
+             */
+            solider_pid_power =
+                0.10f *
+                SOLIDER_PWM_HOLD_DUTY;
+        }
+        break;
+
+        case SOLIDER_BURST_OFF:
+        default:
+        {
+            solider_on_ms =
+                0U;
+
+            solider_off_ms =
+                SOLIDER_FULL_OFF_MS;
+
+            solider_pid_power =
+                0.00f;
+        }
+        break;
+    }
+
+    solider_burst_debug =
+        (uint8_t)solider_burst_mode;
+
+    solider_debug_on_ms =
+        solider_on_ms;
+
+    solider_debug_off_ms =
+        solider_off_ms;
+
+    /*
+     * Reset per-frame current measurement.
+     */
+    solider_current_sum =
+        0.0f;
+
+    solider_current_count =
+        0U;
+
+    uint32_t now =
+        HAL_GetTick();
+
+    /*
+     * OFF mode has no ON phase.
+     */
+    if(solider_on_ms == 0U)
+    {
+        Solider_HeaterOff();
+
+        solider_off_tick =
+            now;
+
+        solider_adc_sum =
+            0U;
+
+        solider_adc_count =
+            0U;
+
+        adc1_dma_ready =
+            0U;
+
+        solider_pid_state =
+            SOLIDER_PID_OFF_WAIT;
+
+        solider_phase_started =
+            1U;
+
+        return;
+    }
+
+    /*
+     * HEAT/HOLD:
+     * begin ON portion.
+     */
+    Solider_HeaterOn();
+
+    solider_pid_tick =
+        now;
+
+    solider_pid_state =
+        SOLIDER_PID_RUN;
+
+    solider_phase_started =
+        1U;
+}
+
+
+/* =========================================================
+ * CURRENT FILTER
+ * ========================================================= */
+
+static void Solider_FinishCurrentMeasurement(void)
+{
+    if(solider_current_count == 0U)
+        return;
+
+    solider_current_avg =
+        solider_current_sum /
+        (float)solider_current_count;
+
+    if(solider_current_filter_init == 0U)
+    {
+        solider_current_filtered =
+            solider_current_avg;
+
+        solider_current_filter_init =
+            1U;
+    }
+    else
+    {
+        solider_current_filtered =
+            (
+                1.0f -
+                SOL_CURRENT_EMA_ALPHA
+            ) *
+            solider_current_filtered +
+            SOL_CURRENT_EMA_ALPHA *
+            solider_current_avg;
+    }
+}
+
+
+/* =========================================================
+ * TEMPERATURE PROCESSING
+ * ========================================================= */
+
+static void Solider_ProcessTemperatureMeasurement(void)
+{
+    if(solider_adc_count == 0U)
+    {
+        /*
+         * It is possible for the main loop to miss all ADC-ready
+         * events during the short 5-ms OFF window.
+         *
+         * In that case keep the previous valid temperature and
+         * simply try again next frame.
+         */
+        return;
+    }
+
+    uint16_t adc_avg =
+        (uint16_t)(
+            solider_adc_sum /
+            (uint32_t)solider_adc_count
+        );
+
+    solider_temp_raw =
+        (float)adc_avg;
+
+    float temp_sample =
+        Solider_ADC_ToTemp(
+            adc_avg
+        );
+
+    if(solider_temp_filter_init == 0U)
+    {
+        measured_temp =
+            temp_sample;
+
+        frev_measured_temp =
+            temp_sample;
+
+        solider_temp_filter_init =
+            1U;
+    }
+    else
+    {
+        measured_temp =
+            temp_sample *
+            ALPHA_FIR +
+            frev_measured_temp *
+            (1.0f - ALPHA_FIR);
+
+        frev_measured_temp =
+            measured_temp;
+    }
+
+    /*
+     * Update UI only after a valid temperature reading.
+     */
+    UI_Solider_SetData(
+        measured_temp,
+        solider_current_filtered,
+        PowerStage.temp,
+        solider_current_filtered *
+        PowerStage.vout,
+        PowerStage.vout
+    );
+}
+
+
+/* =========================================================
+ * NON-BLOCKING 50-ms BURST CONTROLLER
+ *
+ * HEAT:
+ *
+ *   |<---------- 50 ms ---------->|
+ *   | ON 45 ms | OFF 5 ms         |
+ *                  ^
+ *                  +-- ADC sensing
+ *
+ * HOLD:
+ *
+ *   |<---------- 50 ms ---------->|
+ *   |ON 5| OFF 45 ms              |
+ *          ^
+ *          +-- ADC sensing
+ *
+ * No HAL_Delay() is used here.
  * ========================================================= */
 
 void Solider_PID_Task(float set_adc)
 {
-    /* Retained only for compatibility with the old API. */
+    /*
+     * Retained for compatibility with the old API.
+     */
     (void)set_adc;
 
-    uint32_t now = HAL_GetTick();
-
-    switch(solider_pid_state)
+    if(solider_pid_state ==
+       SOLIDER_PID_IDLE)
     {
-        case SOLIDER_PID_IDLE:
-        {
-            SOLIDER_PWM_CCR = SOLIDER_CCR_OFF;
-        }
-        break;
-
-        case SOLIDER_PID_RUN:
-        {
-            float current_sample = PowerStage.current;
-
-            if(current_sample >= 0.0f &&
-               current_sample <= SOL_CURR_MAX)
-            {
-                solider_current_sum += current_sample;
-                solider_current_count++;
-            }
-
-            if((uint32_t)(now - solider_pid_tick) >=
-               SOLIDER_PID_PERIOD_MS)
-            {
-                solider_pid_tick = now;
-
-                if(solider_current_count > 0U)
-                {
-                    solider_current_avg =
-                        solider_current_sum /
-                        (float)solider_current_count;
-
-                    if(solider_current_filter_init == 0U)
-                    {
-                        solider_current_filtered =
-                            solider_current_avg;
-
-                        solider_current_filter_init = 1U;
-                    }
-                    else
-                    {
-                        solider_current_filtered =
-                            (1.0f - SOL_CURRENT_EMA_ALPHA) *
-                            solider_current_filtered +
-                            SOL_CURRENT_EMA_ALPHA *
-                            solider_current_avg;
-                    }
-                }
-
-                solider_current_sum = 0.0f;
-                solider_current_count = 0U;
-
-                /* Heater OFF before sensing tip temperature. */
-                SOLIDER_PWM_CCR = SOLIDER_CCR_OFF;
-
-                solider_off_tick = now;
-                solider_adc_sum = 0U;
-                solider_adc_count = 0U;
-                adc1_dma_ready = 0U;
-
-                solider_pid_state = SOLIDER_PID_OFF_WAIT;
-            }
-        }
-        break;
-
-        case SOLIDER_PID_OFF_WAIT:
-        {
-            if((uint32_t)(now - solider_off_tick) >=
-               SOLIDER_OFF_READ_DELAY_MS)
-            {
-                solider_adc_sum = 0U;
-                solider_adc_count = 0U;
-                adc1_dma_ready = 0U;
-
-                solider_pid_state = SOLIDER_PID_READ_ADC;
-            }
-        }
-        break;
-
-        case SOLIDER_PID_READ_ADC:
-        {
-            if(adc1_dma_ready)
-            {
-                adc1_dma_ready = 0U;
-
-                solider_adc_sum +=
-                    adc1_dma_buf[SOLIDER_ADC_INDEX];
-
-                solider_adc_count++;
-
-                if(solider_adc_count >= SOLIDER_ADC_AVG_N)
-                {
-                    uint16_t adc_avg =
-                        (uint16_t)(
-                            solider_adc_sum /
-                            SOLIDER_ADC_AVG_N
-                        );
-
-                    solider_temp_raw = (float)adc_avg;
-
-                    measured_temp =
-                        Solider_ADC_ToTemp(adc_avg);
-
-                    /*
-                     * EMA smoothing:
-                     * alpha = 0.25 keeps the graph stable while the
-                     * faster sampling loop remains responsive.
-                     */
-                    measured_temp =
-                        measured_temp * ALPHA_FIR +
-                        frev_measured_temp *
-                        (1.0f - ALPHA_FIR);
-
-                    frev_measured_temp = measured_temp;
-
-                    set_temp =
-                        UI_Solider_GetSetTemp();
-
-                    power_ =
-                        Solider_PID_Compute(
-                            set_temp,
-                            measured_temp
-                        );
-
-                    Solider_SetPower(power_);
-
-                    UI_Solider_SetData(
-                        measured_temp,
-                        solider_current_filtered,
-                        PowerStage.temp,
-                        solider_current_filtered * PowerStage.vout,
-                        PowerStage.vout
-                    );
-
-                    solider_pid_state = SOLIDER_PID_RUN;
-                }
-            }
-        }
-        break;
-
-        default:
-        {
-            solider_pid_state = SOLIDER_PID_IDLE;
-            Solider_PID_Reset();
-        }
-        break;
+        Solider_HeaterOff();
+        return;
     }
-}
 
+    uint32_t now =
+        HAL_GetTick();
+
+    /*
+     * Start next 50-ms frame.
+     */
+    if(solider_phase_started == 0U)
+    {
+        Solider_StartFrame();
+        return;
+    }
+
+
+    /* -----------------------------------------------------
+     * ON PHASE
+     * ----------------------------------------------------- */
+    if(solider_pid_state ==
+       SOLIDER_PID_RUN)
+    {
+        uint32_t on_elapsed =
+            (uint32_t)(
+                now -
+                solider_pid_tick
+            );
+
+        /*
+         * Fast TIM3 PWM is active only inside the outer ON window.
+         * Ramp its duty for the first few milliseconds to reduce
+         * the load step at each HEAT/HOLD pulse.
+         */
+        Solider_UpdatePwmRamp(
+            on_elapsed
+        );
+
+        /*
+         * Accumulate measured heater/output current while ON.
+         */
+        float current_sample =
+            PowerStage.current;
+
+        if(current_sample >= 0.0f &&
+           current_sample <= SOL_CURR_MAX)
+        {
+            solider_current_sum +=
+                current_sample;
+
+            solider_current_count++;
+        }
+
+        if(on_elapsed >=
+           solider_on_ms)
+        {
+            /*
+             * End ON phase.
+             */
+            Solider_HeaterOff();
+
+            Solider_FinishCurrentMeasurement();
+
+            solider_off_tick =
+                now;
+
+            solider_adc_sum =
+                0U;
+
+            solider_adc_count =
+                0U;
+
+            adc1_dma_ready =
+                0U;
+
+            solider_pid_state =
+                SOLIDER_PID_OFF_WAIT;
+        }
+
+        return;
+    }
+
+
+    /* -----------------------------------------------------
+     * OFF PHASE + TEMPERATURE SENSING
+     * ----------------------------------------------------- */
+    if(solider_pid_state ==
+       SOLIDER_PID_OFF_WAIT)
+    {
+        uint32_t off_elapsed =
+            (uint32_t)(
+                now -
+                solider_off_tick
+            );
+
+        /*
+         * Wait a short time for heater switching/sense
+         * transients to settle, then collect as many ADC-ready
+         * samples as are available.
+         */
+        if(off_elapsed >=
+           SOLIDER_ADC_SETTLE_MS)
+        {
+            if(adc1_dma_ready != 0U)
+            {
+                adc1_dma_ready =
+                    0U;
+
+                if(solider_adc_count <
+                   SOLIDER_ADC_MAX_SAMPLES)
+                {
+                    solider_adc_sum +=
+                        adc1_dma_buf[
+                            SOLIDER_ADC_INDEX
+                        ];
+
+                    solider_adc_count++;
+                }
+            }
+        }
+
+        /*
+         * End OFF phase -> complete exactly one 50-ms frame.
+         */
+        if(off_elapsed >=
+           solider_off_ms)
+        {
+            Solider_ProcessTemperatureMeasurement();
+
+            /*
+             * Force next task pass to choose HEAT/HOLD/OFF again
+             * from the latest temperature.
+             */
+            solider_phase_started =
+                0U;
+
+            solider_pid_state =
+                SOLIDER_PID_RUN;
+        }
+
+        return;
+    }
+
+
+    /*
+     * READ_ADC is no longer needed by the burst controller.
+     * Recover safely if an old/stale state somehow appears.
+     */
+    solider_pid_state =
+        SOLIDER_PID_RUN;
+
+    solider_phase_started =
+        0U;
+
+    Solider_HeaterOff();
+}

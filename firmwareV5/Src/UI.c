@@ -52,7 +52,7 @@
 #define SOLDER_ROUTE_PIN               GPIO_PIN_15
 
 #define SOLDER_C245_BB_VSET            18.0f
-#define SOLDER_C245_BB_ISET             5.0f
+#define SOLDER_C245_BB_ISET             6.0f
 #define SOLDER_C210_BB_VSET            12.0f
 #define SOLDER_C210_BB_ISET             5.0f
 
@@ -62,6 +62,27 @@
 #define ENC_COUNTS_PER_DETENT          4
 #define MENU_HOLD_MS                   1000U
 #define SOLDER_HOLD_MS                 1000U
+
+/*
+ * POWER -> SOLDER transition dead time.
+ *
+ * Sequence:
+ *   1. Disable BB output
+ *   2. Wait 300 ms
+ *   3. Switch PB15 to SOLDER route
+ *   4. Apply C245/C210 BB setpoints and enable output
+ */
+#define SOLDER_POWER_SWITCH_DELAY_MS    300U
+
+/*
+ * After the BB converter is enabled with the SOLDER setpoint,
+ * keep the heater OFF long enough for Vout/Cout to charge.
+ *
+ * 1000 ms is intentional:
+ * with the current SOFT-start slope (~20 V/s), C245 at 18 V
+ * needs about 0.9 s to reach its requested output voltage.
+ */
+#define SOLDER_CAP_PRECHARGE_DELAY_MS   1000U
 
 /* 1 = boot directly to SOLDER, 0 = boot to NUMBER. */
 #define BOOT_DEFAULT_SOLDER            0U
@@ -173,6 +194,18 @@ typedef enum
     PROTECT_FAULT_EXTERNAL
 } ProtectFault_t;
 
+
+/*
+ * Fault codes exported by main.c.
+ * Keep these numeric values synchronized with main.c.
+ */
+#define POWER_FAULT_NONE          0U
+#define POWER_FAULT_VIN_LOW       1U
+#define POWER_FAULT_TEMP          2U
+#define POWER_FAULT_HARD_CURRENT  3U
+
+extern volatile uint8_t g_power_fault_code;
+
 static float protect_ovp = PROTECT_OVP_DEFAULT;
 static float protect_ocp = PROTECT_OCP_DEFAULT;
 static float protect_opp = PROTECT_OPP_DEFAULT;
@@ -208,23 +241,37 @@ static void protection_task(void);
  * ========================================================= */
 
 /*
- * Fault pattern:
- *    BEEP 150 ms
- *    OFF  150 ms
- *    BEEP 150 ms
- *    OFF  150 ms
- *    BEEP 150 ms
+ * =========================================================
+ * FAULT BUZZER CODES
  *
+ * All beeps are 150 ms ON / 150 ms OFF:
+ *
+ *   1 beep = OVP
+ *   2 beep = OCP
+ *   3 beep = OPP
+ *   4 beep = HARD CURRENT (main.c)
+ *   5 beep = POWER-STAGE TEMPERATURE
+ *   6 beep = VIN LOW / VIN COLLAPSE while running
+ *   7 beep = UNKNOWN EXTERNAL FAULT
+ *
+ * Fault beeps ignore the normal BUZZER menu setting.
  * Completely non-blocking.
- */
+ * ========================================================= */
 #define BUZZER_BEEP_MS                  150U
 #define BUZZER_GAP_MS                   150U
-#define BUZZER_BEEP_COUNT                 3U
+
+#define BUZZER_FAULT_OVP_COUNT            1U
+#define BUZZER_FAULT_OCP_COUNT            2U
+#define BUZZER_FAULT_OPP_COUNT            3U
+#define BUZZER_FAULT_HARD_CURRENT_COUNT   4U
+#define BUZZER_FAULT_TEMP_COUNT           5U
+#define BUZZER_FAULT_VIN_COUNT            6U
+#define BUZZER_FAULT_UNKNOWN_COUNT        7U
 
 static uint8_t buzzer_pattern_active = 0U;
 static uint8_t buzzer_phase_on = 0U;
 static uint8_t buzzer_beep_count = 0U;
-static uint8_t buzzer_target_count = BUZZER_BEEP_COUNT;
+static uint8_t buzzer_target_count = 1U;
 static uint32_t buzzer_tick = 0U;
 
 static void buzzer_write(uint8_t on)
@@ -265,9 +312,69 @@ static void buzzer_button_start(void)
         buzzer_start(1U);
 }
 
-static void buzzer_fault_start(void)
+static void buzzer_fault_start(ProtectFault_t fault)
 {
-    buzzer_start(BUZZER_BEEP_COUNT);
+    uint8_t count =
+        BUZZER_FAULT_UNKNOWN_COUNT;
+
+    switch(fault)
+    {
+        case PROTECT_FAULT_OVP:
+            count =
+                BUZZER_FAULT_OVP_COUNT;
+            break;
+
+        case PROTECT_FAULT_OCP:
+            count =
+                BUZZER_FAULT_OCP_COUNT;
+            break;
+
+        case PROTECT_FAULT_OPP:
+            count =
+                BUZZER_FAULT_OPP_COUNT;
+            break;
+
+        case PROTECT_FAULT_EXTERNAL:
+        {
+            /*
+             * Decode the more specific fault raised by main.c.
+             */
+            switch(g_power_fault_code)
+            {
+                case POWER_FAULT_HARD_CURRENT:
+                    count =
+                        BUZZER_FAULT_HARD_CURRENT_COUNT;
+                    break;
+
+                case POWER_FAULT_TEMP:
+                    count =
+                        BUZZER_FAULT_TEMP_COUNT;
+                    break;
+
+                case POWER_FAULT_VIN_LOW:
+                    count =
+                        BUZZER_FAULT_VIN_COUNT;
+                    break;
+
+                case POWER_FAULT_NONE:
+                default:
+                    count =
+                        BUZZER_FAULT_UNKNOWN_COUNT;
+                    break;
+            }
+        }
+        break;
+
+        case PROTECT_FAULT_NONE:
+        default:
+            count =
+                BUZZER_FAULT_UNKNOWN_COUNT;
+            break;
+    }
+
+    buzzer_start(
+        count
+    );
 }
 
 static void buzzer_task(void)
@@ -1041,15 +1148,32 @@ static uint32_t vbtn_press_tick = 0U;
 #define GRAPH_W                        (GRAPH_X1 - GRAPH_X0 + 1)
 #define GRAPH_H                        (GRAPH_Y1 - GRAPH_Y0 + 1)
 
+#define GRAPH_PLOT_X0                  (GRAPH_X0 + 1)
+#define GRAPH_PLOT_X1                  (GRAPH_X1 - 1)
+#define GRAPH_PLOT_Y0                  (GRAPH_Y0 + 1)
+#define GRAPH_PLOT_Y1                  (GRAPH_Y1 - 1)
+
+#define GRAPH_PLOT_W                   (GRAPH_PLOT_X1 - GRAPH_PLOT_X0 + 1)
+#define GRAPH_PLOT_H                   (GRAPH_PLOT_Y1 - GRAPH_PLOT_Y0 + 1)
+
+/*
+ * Strip-chart scrolling:
+ * every new sample is placed at the RIGHT edge,
+ * all older samples move LEFT by 2 pixels.
+ *
+ * 2 px/sample keeps the STM32F103 + SPI TFT redraw load reasonable.
+ */
+#define GRAPH_SCROLL_STEP_PX           2U
+#define GRAPH_HISTORY_CAP              (((GRAPH_PLOT_W - 1U) / GRAPH_SCROLL_STEP_PX) + 1U)
+
 #define GRAPH_SAMPLE_MS                250U
 #define GRAPH_VMAX                     30.0f
 #define GRAPH_IMAX                     10.0f
 
-static uint16_t graph_head = 0U;
-static int16_t graph_last_x = -1;
-static int16_t graph_last_yv = -1;
-static int16_t graph_last_yi = -1;
-static uint8_t graph_has_last = 0U;
+static int16_t graph_hist_v[GRAPH_HISTORY_CAP];
+static int16_t graph_hist_i[GRAPH_HISTORY_CAP];
+static uint16_t graph_hist_count = 0U;
+
 static uint32_t graph_tick = 0U;
 
 /* =========================================================
@@ -1927,46 +2051,243 @@ static int graph_map_v(float v)
 {
     v = clampf_ui(v, 0.0f, GRAPH_VMAX);
 
-    return GRAPH_Y1 -
+    return GRAPH_PLOT_Y1 -
         (int)((v / GRAPH_VMAX) *
-        (float)(GRAPH_H - 1));
+        (float)(GRAPH_PLOT_H - 1));
 }
 
 static int graph_map_i(float i)
 {
     i = clampf_ui(i, 0.0f, GRAPH_IMAX);
 
-    return GRAPH_Y1 -
+    return GRAPH_PLOT_Y1 -
         (int)((i / GRAPH_IMAX) *
-        (float)(GRAPH_H - 1));
+        (float)(GRAPH_PLOT_H - 1));
 }
 
-static void graph_restore_grid_column(int x)
+static void graph_draw_grid_inside(void)
 {
-    int y1 = GRAPH_Y0 + GRAPH_H / 4;
-    int y2 = GRAPH_Y0 + GRAPH_H / 2;
-    int y3 = GRAPH_Y0 + 3 * GRAPH_H / 4;
+    for(uint8_t k = 1U; k < 4U; k++)
+    {
+        uint16_t y =
+            (uint16_t)(
+                GRAPH_Y0 +
+                (GRAPH_H * k) / 4U
+            );
 
-    ST7789_DrawPixel((uint16_t)x, (uint16_t)y1, C_GRID);
-    ST7789_DrawPixel((uint16_t)x, (uint16_t)y2, C_GRID);
-    ST7789_DrawPixel((uint16_t)x, (uint16_t)y3, C_GRID);
+        for(uint16_t x = GRAPH_PLOT_X0;
+            x <= GRAPH_PLOT_X1;
+            x += 4U)
+        {
+            ST7789_DrawPixel(
+                x,
+                y,
+                C_GRID
+            );
+        }
+    }
 }
 
-static void graph_clear_column(int x)
+
+/*
+ * Erase ONLY the previously drawn traces.
+ *
+ * Do not clear the whole graph rectangle on every sample.
+ * Clearing the entire plot caused a visible blank frame and
+ * therefore strong TFT flicker.
+ */
+static void graph_erase_history(void)
 {
-    if(x < GRAPH_X0 || x > GRAPH_X1)
+    if(graph_hist_count == 0U)
         return;
 
-    ST7789_DrawFilledRectangle(
-        (uint16_t)x,
-        GRAPH_Y0,
-        1U,
-        GRAPH_H,
-        C_BG
-    );
+    int first_x =
+        GRAPH_PLOT_X1 -
+        (int)(
+            (graph_hist_count - 1U) *
+            GRAPH_SCROLL_STEP_PX
+        );
 
-    graph_restore_grid_column(x);
+    if(graph_hist_count == 1U)
+    {
+        ST7789_DrawPixel(
+            GRAPH_PLOT_X1,
+            (uint16_t)graph_hist_v[0],
+            C_BG
+        );
+
+        ST7789_DrawPixel(
+            GRAPH_PLOT_X1,
+            (uint16_t)graph_hist_i[0],
+            C_BG
+        );
+
+        return;
+    }
+
+    for(uint16_t n = 1U;
+        n < graph_hist_count;
+        n++)
+    {
+        int x0 =
+            first_x +
+            (int)(
+                (n - 1U) *
+                GRAPH_SCROLL_STEP_PX
+            );
+
+        int x1 =
+            first_x +
+            (int)(
+                n *
+                GRAPH_SCROLL_STEP_PX
+            );
+
+        draw_line_fast(
+            x0,
+            graph_hist_v[n - 1U],
+            x1,
+            graph_hist_v[n],
+            C_BG
+        );
+
+        draw_line_fast(
+            x0,
+            graph_hist_i[n - 1U],
+            x1,
+            graph_hist_i[n],
+            C_BG
+        );
+    }
 }
+
+
+static void graph_render_history(void)
+{
+    if(graph_hist_count == 0U)
+        return;
+
+    int first_x =
+        GRAPH_PLOT_X1 -
+        (int)(
+            (graph_hist_count - 1U) *
+            GRAPH_SCROLL_STEP_PX
+        );
+
+    for(uint16_t n = 1U;
+        n < graph_hist_count;
+        n++)
+    {
+        int x0 =
+            first_x +
+            (int)(
+                (n - 1U) *
+                GRAPH_SCROLL_STEP_PX
+            );
+
+        int x1 =
+            first_x +
+            (int)(
+                n *
+                GRAPH_SCROLL_STEP_PX
+            );
+
+        draw_line_fast(
+            x0,
+            graph_hist_v[n - 1U],
+            x1,
+            graph_hist_v[n],
+            C_VOLT
+        );
+
+        draw_line_fast(
+            x0,
+            graph_hist_i[n - 1U],
+            x1,
+            graph_hist_i[n],
+            C_CURR
+        );
+    }
+
+    if(graph_hist_count == 1U)
+    {
+        ST7789_DrawPixel(
+            GRAPH_PLOT_X1,
+            (uint16_t)graph_hist_v[0],
+            C_VOLT
+        );
+
+        ST7789_DrawPixel(
+            GRAPH_PLOT_X1,
+            (uint16_t)graph_hist_i[0],
+            C_CURR
+        );
+    }
+}
+
+
+/*
+ * Update one strip-chart sample without blanking the whole plot.
+ *
+ * Sequence:
+ *   1. erase old trace only
+ *   2. shift history in RAM
+ *   3. restore dotted grid
+ *   4. draw new trace
+ */
+static void graph_push_scroll(int yv,
+                              int yi)
+{
+    /*
+     * Remove only the old curves; the plot background remains
+     * continuously visible, eliminating the full-screen flash.
+     */
+    graph_erase_history();
+
+    if(graph_hist_count <
+       GRAPH_HISTORY_CAP)
+    {
+        graph_hist_v[graph_hist_count] =
+            (int16_t)yv;
+
+        graph_hist_i[graph_hist_count] =
+            (int16_t)yi;
+
+        graph_hist_count++;
+    }
+    else
+    {
+        /*
+         * Shift history one sample to the left in RAM.
+         * Only ~150 points, so this is inexpensive.
+         */
+        for(uint16_t n = 1U;
+            n < GRAPH_HISTORY_CAP;
+            n++)
+        {
+            graph_hist_v[n - 1U] =
+                graph_hist_v[n];
+
+            graph_hist_i[n - 1U] =
+                graph_hist_i[n];
+        }
+
+        graph_hist_v[GRAPH_HISTORY_CAP - 1U] =
+            (int16_t)yv;
+
+        graph_hist_i[GRAPH_HISTORY_CAP - 1U] =
+            (int16_t)yi;
+    }
+
+    /*
+     * Erasing curves also erases any grid pixels they crossed.
+     * Restore the sparse grid first, then draw the new curves.
+     */
+    graph_draw_grid_inside();
+
+    graph_render_history();
+}
+
 
 static void draw_graph_static(void)
 {
@@ -1984,18 +2305,7 @@ static void draw_graph_static(void)
     ST7789_DrawFilledRectangle(GRAPH_X0, GRAPH_Y0, 1, GRAPH_H, C_GRID);
     ST7789_DrawFilledRectangle(GRAPH_X1, GRAPH_Y0, 1, GRAPH_H, C_GRID);
 
-    for(uint8_t k = 1U; k < 4U; k++)
-    {
-        uint16_t y =
-            (uint16_t)(GRAPH_Y0 + (GRAPH_H * k) / 4U);
-
-        for(uint16_t x = GRAPH_X0;
-            x <= GRAPH_X1;
-            x += 4U)
-        {
-            ST7789_DrawPixel(x, y, C_GRID);
-        }
-    }
+    graph_draw_grid_inside();
 
     /*
      * Same control/status area as NUMBER:
@@ -2039,9 +2349,7 @@ static void draw_graph_static(void)
         C_BG
     );
 
-    graph_head = 0U;
-    graph_has_last = 0U;
-    graph_last_x = -1;
+    graph_hist_count = 0U;
     graph_tick = HAL_GetTick();
 
     invalidate_main_cache();
@@ -2116,63 +2424,42 @@ static void draw_graph_set_field(uint8_t is_voltage)
 
 static void graph_sample_task(void)
 {
-    uint32_t now = HAL_GetTick();
+    uint32_t now =
+        HAL_GetTick();
 
     uint32_t graph_ms =
         response_graph_sample_ms();
 
-    if((uint32_t)(now - graph_tick) < graph_ms)
+    if((uint32_t)(
+           now -
+           graph_tick
+       ) <
+       graph_ms)
+    {
         return;
+    }
 
-    graph_tick = now;
+    graph_tick =
+        now;
 
-    int x = GRAPH_X0 + (int)graph_head;
-    int yv = graph_map_v(disp_vout);
-    int yi = graph_map_i(disp_iout);
-
-    graph_clear_column(x);
-
-    if(x < GRAPH_X1)
-        graph_clear_column(x + 1);
-
-    if(graph_has_last &&
-       graph_last_x >= GRAPH_X0 &&
-       x > graph_last_x)
-    {
-        draw_line_fast(
-            graph_last_x,
-            graph_last_yv,
-            x,
-            yv,
-            C_VOLT
+    int yv =
+        graph_map_v(
+            disp_vout
         );
 
-        draw_line_fast(
-            graph_last_x,
-            graph_last_yi,
-            x,
-            yi,
-            C_CURR
+    int yi =
+        graph_map_i(
+            disp_iout
         );
-    }
-    else
-    {
-        ST7789_DrawPixel((uint16_t)x, (uint16_t)yv, C_VOLT);
-        ST7789_DrawPixel((uint16_t)x, (uint16_t)yi, C_CURR);
-    }
 
-    graph_last_x = (int16_t)x;
-    graph_last_yv = (int16_t)yv;
-    graph_last_yi = (int16_t)yi;
-    graph_has_last = 1U;
-
-    graph_head++;
-
-    if(graph_head >= GRAPH_W)
-    {
-        graph_head = 0U;
-        graph_has_last = 0U;
-    }
+    /*
+     * Push newest sample on the right.
+     * Existing trace visually shifts left.
+     */
+    graph_push_scroll(
+        yv,
+        yi
+    );
 
     draw_graph_live_info();
 }
@@ -2428,6 +2715,12 @@ static void enter_solder_mode(void)
         return;
 
     /*
+     * Guarantee heater MOSFET is OFF throughout the complete
+     * POWER -> SOLDER transition and capacitor precharge.
+     */
+    UI_Solider_Exit();
+
+    /*
      * Remember which normal UI should return after SOLDER.
      * If called from MENU, ui_mode still contains the active NUMBER/GRAPH mode.
      */
@@ -2448,6 +2741,42 @@ static void enter_solder_mode(void)
         ui->openloop_ratio;
 
     /*
+     * =====================================================
+     * POWER -> SOLDER transition
+     * =====================================================
+     *
+     * First turn the normal BB output OFF. TIM1 control IRQ
+     * keeps running, so PowerStage_Stop() is executed almost
+     * immediately by the power-stage service routine.
+     */
+    ui->enable =
+        0U;
+
+    ui->state =
+        BBUI_STATE_OFF;
+
+    /*
+     * Dead time requested between POWER and SOLDER.
+     *
+     * This runs from the main UI task, not from an ISR.
+     * TIM1/ADC interrupts continue running during HAL_Delay().
+     */
+    HAL_Delay(
+        SOLDER_POWER_SWITCH_DELAY_MS
+    );
+
+#if SOLDER_ROUTE_ENABLE
+    /*
+     * Switch the physical route only while BB output is OFF.
+     */
+    HAL_GPIO_WritePin(
+        SOLDER_ROUTE_PORT,
+        SOLDER_ROUTE_PIN,
+        GPIO_PIN_SET
+    );
+#endif
+
+    /*
      * SOLDER always uses normal closed-loop regulation.
      */
     ui->control_mode =
@@ -2458,30 +2787,137 @@ static void enter_solder_mode(void)
      *   C245 -> 18 V / 6 A
      *   C210 -> 12 V / 5 A
      */
-    solder_get_bb_setpoints(&ui->vset, &ui->iset);
-    ui->enable = 1U;
-    ui->state = BBUI_STATE_CV;
+    solder_get_bb_setpoints(
+        &ui->vset,
+        &ui->iset
+    );
 
-    protect_fault = PROTECT_FAULT_NONE;
-    protect_fault_latched = 0U;
+    protect_fault =
+        PROTECT_FAULT_NONE;
+
+    protect_fault_latched =
+        0U;
+
     protection_arm();
 
-#if SOLDER_ROUTE_ENABLE
     /*
-     * SOLDER route ON.
+     * Enable BB only AFTER the SOLDER route and setpoints are ready.
      */
-    HAL_GPIO_WritePin(SOLDER_ROUTE_PORT,
-                      SOLDER_ROUTE_PIN,
-                      GPIO_PIN_SET);
+    ui->enable =
+        1U;
+
+    ui->state =
+        BBUI_STATE_CV;
+
+    /*
+     * =====================================================
+     * SOLDER OUTPUT CAPACITOR PRECHARGE
+     * =====================================================
+     *
+     * The heater is still OFF here because UI_Solider_Enter()
+     * has not been called yet.
+     *
+     * TIM1/ADC interrupts continue running during HAL_Delay(),
+     * therefore the BB CV loop can ramp Vout and charge Cout.
+     */
+    /*
+     * Do not use one blocking HAL_Delay(1000) here.
+     *
+     * During precharge the TIM1 ISR can detect HARD CURRENT,
+     * TEMP or VIN faults, while UI protection must also remain
+     * alive to detect OVP/OCP/OPP.
+     *
+     * Run protection continuously while Cout is charging.
+     */
+    uint32_t precharge_start =
+        HAL_GetTick();
+
+    while((uint32_t)(
+              HAL_GetTick() -
+              precharge_start
+          ) <
+          SOLDER_CAP_PRECHARGE_DELAY_MS)
+    {
+        protection_task();
+        buzzer_task();
+
+        /*
+         * A fault may originate either from UI protection
+         * (OVP/OCP/OPP) or from main.c.
+         *
+         * Never start the heater after a failed precharge.
+         */
+        if((ui->state ==
+            BBUI_STATE_FAULT) ||
+           (ui->enable == 0U))
+        {
+#if SOLDER_ROUTE_ENABLE
+            HAL_GPIO_WritePin(
+                SOLDER_ROUTE_PORT,
+                SOLDER_ROUTE_PIN,
+                GPIO_PIN_RESET
+            );
 #endif
 
-    UI_Solider_SetTheme((ui_theme == UI_THEME_LIGHT) ? 1U : 0U);
+            status_dirty =
+                1U;
+
+            return;
+        }
+
+        HAL_Delay(1U);
+    }
+
+    /*
+     * Final guard immediately before enabling the heater.
+     */
+    if((ui->state ==
+        BBUI_STATE_FAULT) ||
+       (ui->enable == 0U))
+    {
+#if SOLDER_ROUTE_ENABLE
+        HAL_GPIO_WritePin(
+            SOLDER_ROUTE_PORT,
+            SOLDER_ROUTE_PIN,
+            GPIO_PIN_RESET
+        );
+#endif
+        return;
+    }
+
+    /*
+     * Only after Cout/Vout has charged successfully do we start
+     * the 45/5 or 5/45 heater burst controller.
+     */
+    UI_Solider_SetTheme(
+        (ui_theme == UI_THEME_LIGHT)
+        ? 1U
+        : 0U
+    );
+
     UI_Solider_Enter();
 
     screen = SCREEN_SOLDER;
 
+    /*
+     * Re-synchronize holder input when entering SOLDER.
+     * This avoids carrying a stale debounce state from POWER mode.
+     */
+    sleep_raw_last =
+        HAL_GPIO_ReadPin(
+            SOLDER_SLEEP_PORT,
+            SOLDER_SLEEP_PIN
+        );
+
+    sleep_stable =
+        sleep_raw_last;
+
+    sleep_changed_tick =
+        HAL_GetTick();
+
     UI_Solider_SetSleep(
-        HAL_GPIO_ReadPin(SOLDER_SLEEP_PORT, SOLDER_SLEEP_PIN) == SOLDER_SLEEP_ACTIVE,
+        sleep_stable ==
+        SOLDER_SLEEP_ACTIVE,
         sleep_temp
     );
 
@@ -2535,14 +2971,75 @@ static void exit_solder_mode(void)
 /* PB11 holder/sleep detector. */
 static void solder_sleep_task(void)
 {
-    GPIO_PinState raw=HAL_GPIO_ReadPin(SOLDER_SLEEP_PORT,SOLDER_SLEEP_PIN);
-    uint32_t now=HAL_GetTick();
-    if(raw!=sleep_raw_last){sleep_raw_last=raw;sleep_changed_tick=now;}
-    if((uint32_t)(now-sleep_changed_tick)<SOLDER_SLEEP_DEBOUNCE_MS) return;
-    if(raw==sleep_stable) return;
-    sleep_stable=raw;
-    if(screen!=SCREEN_SOLDER) return;
-    UI_Solider_SetSleep(sleep_stable==SOLDER_SLEEP_ACTIVE,sleep_temp);
+    GPIO_PinState raw =
+        HAL_GPIO_ReadPin(
+            SOLDER_SLEEP_PORT,
+            SOLDER_SLEEP_PIN
+        );
+
+    uint32_t now =
+        HAL_GetTick();
+
+    /*
+     * Raw edge detected:
+     * restart debounce timer.
+     */
+    if(raw != sleep_raw_last)
+    {
+        sleep_raw_last =
+            raw;
+
+        sleep_changed_tick =
+            now;
+    }
+
+    /*
+     * Wait until the new level has remained stable long enough.
+     */
+    if((uint32_t)(
+           now -
+           sleep_changed_tick
+       ) <
+       SOLDER_SLEEP_DEBOUNCE_MS)
+    {
+        return;
+    }
+
+    /*
+     * Accept the debounced level.
+     *
+     * Important:
+     * update sleep_stable even outside SOLDER so the software always
+     * knows the real holder state.
+     */
+    sleep_stable =
+        raw;
+
+    /*
+     * While SOLDER is active, continuously synchronize the UI/control
+     * state from the debounced pin LEVEL.
+     *
+     * Do not depend only on a one-shot edge event. Therefore, even if
+     * a transition occurred during a screen change or was missed once,
+     * the next task pass repairs the state automatically.
+     */
+    if(screen == SCREEN_SOLDER)
+    {
+        uint8_t want_sleep =
+            (sleep_stable ==
+             SOLDER_SLEEP_ACTIVE)
+            ? 1U
+            : 0U;
+
+        if(UI_Solider_IsSleeping() !=
+           want_sleep)
+        {
+            UI_Solider_SetSleep(
+                want_sleep,
+                sleep_temp
+            );
+        }
+    }
 }
 
 /*
@@ -2684,6 +3181,13 @@ static void clear_protection_fault(void)
     protect_fault_latched = 0U;
     protect_fault = PROTECT_FAULT_NONE;
 
+    /*
+     * Clear the cause exported by main.c as part of the user's
+     * fault acknowledgement.
+     */
+    g_power_fault_code =
+        POWER_FAULT_NONE;
+
     protect_pending_fault = PROTECT_FAULT_NONE;
     protect_violation_tick = 0U;
 
@@ -2754,7 +3258,7 @@ static void protection_trip(ProtectFault_t fault)
     protect_pending_fault = PROTECT_FAULT_NONE;
     protect_violation_tick = 0U;
 
-    buzzer_fault_start();
+    buzzer_fault_start(fault);
 
     if(screen == SCREEN_SOLDER)
         abort_solder_on_fault();
@@ -2797,7 +3301,7 @@ static void protection_task(void)
         protect_fault = PROTECT_FAULT_EXTERNAL;
         protect_fault_latched = 1U;
 
-        buzzer_fault_start();
+        buzzer_fault_start(PROTECT_FAULT_EXTERNAL);
         status_dirty = 1U;
     }
 
@@ -3292,14 +3796,32 @@ static void button_task(void)
 
 static void solder_buzzer_event_task(void)
 {
-    uint8_t events = UI_Solider_GetEvents();
+    uint8_t events =
+        UI_Solider_GetEvents();
 
-    if(events == UI_SOLDER_EVENT_NONE)
+    if(events ==
+       UI_SOLDER_EVENT_NONE)
+    {
         return;
+    }
+
+    /*
+     * A normal SOLDER event must NEVER overwrite a fault pattern.
+     *
+     * This was the reason a real 4/5/6-beep main fault could sound
+     * like only one beep immediately after entering SOLDER.
+     */
+    if((ui != NULL) &&
+       ((ui->state ==
+         BBUI_STATE_FAULT) ||
+        (protect_fault_latched != 0U)))
+    {
+        return;
+    }
 
     /*
      * BUZZER menu controls normal interaction/status beeps.
-     * Fault remains 3 beeps regardless of this setting.
+     * Fault patterns always sound regardless of this setting.
      */
     if(!buzzer_button_enable)
         return;
@@ -3539,6 +4061,10 @@ void BBUI_Init(BBUI_Data_t *data,
     protect_fault = PROTECT_FAULT_NONE;
     protect_fault_latched = 0U;
     protect_pending_fault = PROTECT_FAULT_NONE;
+
+    g_power_fault_code =
+        POWER_FAULT_NONE;
+
     protect_enable_tick = HAL_GetTick();
     protect_prev_enable = 0U;
 

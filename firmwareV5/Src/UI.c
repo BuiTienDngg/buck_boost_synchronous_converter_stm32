@@ -27,7 +27,17 @@
 #define SOLDER_SLEEP_PORT              GPIOB
 #define SOLDER_SLEEP_PIN               GPIO_PIN_11
 #define SOLDER_SLEEP_ACTIVE            GPIO_PIN_RESET
-#define SOLDER_SLEEP_DEBOUNCE_MS       150U
+
+/*
+ * PB11 is sampled only while the solder heater is fully OFF.
+ *
+ * Heater OFF in the current TIM3 implementation:
+ *     solider_pwm_ccr == TIM3->ARR
+ *
+ * Wait 2 ms after entering OFF so gate/sense switching noise has
+ * settled. This matches the temperature-sensing settle interval.
+ */
+#define SOLDER_SLEEP_OFF_SETTLE_MS     2U
 
 /*
  * BUZZER control.
@@ -51,7 +61,7 @@
 #define SOLDER_ROUTE_PORT              GPIOB
 #define SOLDER_ROUTE_PIN               GPIO_PIN_15
 
-#define SOLDER_C245_BB_VSET            18.0f
+#define SOLDER_C245_BB_VSET            20.0f
 #define SOLDER_C245_BB_ISET             6.0f
 #define SOLDER_C210_BB_VSET            12.0f
 #define SOLDER_C210_BB_ISET             5.0f
@@ -92,10 +102,10 @@
  * ========================================================= */
 
 #define VSET_MIN                       1.00f
-#define VSET_MAX                       30.00f
+#define VSET_MAX                       50.00f
 
 #define ISET_MIN                       0.10f
-#define ISET_MAX                       10.00f
+#define ISET_MAX                       12.00f
 
 
 /* =========================================================
@@ -142,6 +152,27 @@ static BBUI_ControlMode_t flash_control_mode = BB_CONTROL_CLOSED;
 static float flash_openloop_ratio = 0.50f;
 
 
+/* =========================================================
+ * SETPOINT FLASH AUTOSAVE
+ *
+ * Do NOT write Flash on every encoder detent.
+ * Wait until the user has stopped changing VSET/ISET for 1.2 s.
+ *
+ * This gives:
+ *   - latest setpoint survives power-cycle
+ *   - much lower Flash erase/write count
+ * ========================================================= */
+
+#define UI_FLASH_AUTOSAVE_DELAY_MS       1200U
+
+static uint8_t ui_flash_dirty = 0U;
+static uint32_t ui_flash_dirty_tick = 0U;
+
+/* Keil Watch helpers */
+volatile uint8_t ui_flash_last_read_ok = 0U;
+volatile uint8_t ui_flash_last_save_ok = 0U;
+
+
 /*
  * Main UI data pointer.
  *
@@ -155,25 +186,30 @@ static BBUI_Data_t *ui = NULL;
  * ========================================================= */
 
 /*
- * Default thresholds.
+ * Default thresholds for 50-V / 12-A user range.
  *
- * OVP is intentionally slightly above the normal 30 V maximum
- * so operating at 30.0 V does not nuisance-trip due to ADC noise.
+ * Protection is intentionally set slightly above normal setpoint
+ * maxima to avoid nuisance trips due to ripple/noise.
  */
-#define PROTECT_OVP_DEFAULT             31.0f
-#define PROTECT_OCP_DEFAULT              8.5f
+#define PROTECT_OVP_DEFAULT             52.0f
+#define PROTECT_OCP_DEFAULT             12.5f
 #define PROTECT_OPP_DEFAULT            200.0f
 
 #define PROTECT_OVP_MIN                  5.0f
-#define PROTECT_OVP_MAX                 35.0f
+#define PROTECT_OVP_MAX                 60.0f
 #define PROTECT_OVP_STEP                 0.5f
 
 #define PROTECT_OCP_MIN                  0.5f
-#define PROTECT_OCP_MAX                 12.0f
+#define PROTECT_OCP_MAX                 14.0f
 #define PROTECT_OCP_STEP                 0.1f
 
+/*
+ * 50 V x 12 A = 600 W theoretical user-range product.
+ * Keep default OPP at 200 W for safety, but allow menu adjustment
+ * up to 600 W if the real hardware is designed for that power.
+ */
 #define PROTECT_OPP_MIN                 10.0f
-#define PROTECT_OPP_MAX                300.0f
+#define PROTECT_OPP_MAX                600.0f
 #define PROTECT_OPP_STEP                10.0f
 
 /*
@@ -206,6 +242,13 @@ typedef enum
 
 extern volatile uint8_t g_power_fault_code;
 
+extern volatile float g_power_fault_vin;
+extern volatile float g_power_fault_vout;
+extern volatile float g_power_fault_current;
+extern volatile float g_power_fault_temp;
+extern volatile float g_power_fault_value;
+extern volatile float g_power_fault_limit;
+
 static float protect_ovp = PROTECT_OVP_DEFAULT;
 static float protect_ocp = PROTECT_OCP_DEFAULT;
 static float protect_opp = PROTECT_OPP_DEFAULT;
@@ -223,6 +266,45 @@ static uint32_t protect_violation_tick = 0U;
 static ProtectFault_t protect_pending_fault = PROTECT_FAULT_NONE;
 static uint8_t protect_prev_enable = 0U;
 
+
+/* =========================================================
+ * FULL-SCREEN FAULT SNAPSHOT
+ * ========================================================= */
+
+typedef struct
+{
+    ProtectFault_t fault;
+    uint8_t power_fault_code;
+
+    float vin;
+    float vout;
+    float current;
+    float temp;
+    float power;
+
+    /*
+     * Quantity that actually crossed the fault threshold.
+     */
+    float trip_value;
+    float trip_limit;
+
+    uint8_t valid;
+} FaultSnapshot_t;
+
+static FaultSnapshot_t fault_snapshot =
+{
+    .fault = PROTECT_FAULT_NONE,
+    .power_fault_code = POWER_FAULT_NONE,
+    .vin = 0.0f,
+    .vout = 0.0f,
+    .current = 0.0f,
+    .temp = 0.0f,
+    .power = 0.0f,
+    .trip_value = 0.0f,
+    .trip_limit = 0.0f,
+    .valid = 0U
+};
+
 /*
  * Forward declarations.
  *
@@ -234,6 +316,11 @@ static void clear_protection_fault(void);
 static void protection_trip(ProtectFault_t fault);
 static void protection_arm(void);
 static void protection_task(void);
+
+static void fault_capture_snapshot(ProtectFault_t fault);
+static void draw_fault_screen(void);
+static void enter_fault_screen(void);
+static void fault_reset_and_restart(void);
 
 
 /* =========================================================
@@ -419,99 +506,47 @@ static void buzzer_task(void)
  */
 static float clampf_ui(float x, float lo, float hi);
 
+/*
+ * Forward declaration required because ui_flash_autosave_task()
+ * uses is_live_screen() before its full definition later.
+ */
+static uint8_t is_live_screen(void);
+
+static void ui_flash_mark_dirty(void);
+static void ui_flash_autosave_task(void);
+
 /* =========================================================
- * FLASH MEMORY - SAVE VSET / ISET + PROTECTION
+ * COMPACT FLASH SETTINGS - PURE BUCK
  *
- * STM32F103C8T6:
- *   Flash base     = 0x08000000
- *   Official size  = 64 KB
- *   Page size      = 1 KB
- *   Last page      = 0x0800FC00
+ * STM32F103C8T6 official Flash:
+ *   0x08000000 .. 0x0800FFFF = 64 KB
+ *
+ * Reserve final 1 KB page:
+ *   0x0800FC00 .. 0x0800FFFF
+ *
+ * Keil:
+ *   IROM1 Start = 0x08000000
+ *   IROM1 Size  = 0x0000FC00
+ *
+ * This implementation intentionally supports ONLY the current
+ * settings format. Old V1..V6 migration code has been removed
+ * to save program Flash.
  *
  * IMPORTANT:
- * Reserve the last 1 KB of Flash for settings.
- * Application code must NOT occupy this page.
+ * Flash erase/program is never performed while POWER is ON.
  * ========================================================= */
 
 #define UI_FLASH_PAGE_ADDR              0x0800FC00U
-#define UI_FLASH_MAGIC                  0x42554242U
+#define UI_FLASH_MAGIC                  0x42554250U   /* "BUBP" */
+#define UI_FLASH_VERSION                0x00020001U
 
-#define UI_FLASH_VERSION_V1             0x00010001U
-#define UI_FLASH_VERSION_V2             0x00010002U
-#define UI_FLASH_VERSION_V3             0x00010003U
-#define UI_FLASH_VERSION_V4             0x00010004U
-#define UI_FLASH_VERSION_V5             0x00010005U
-#define UI_FLASH_VERSION                0x00010006U
+/*
+ * Wait after the output becomes OFF / user stops editing before
+ * doing a page erase. This lets the power stage settle first.
+ */
+#undef  UI_FLASH_AUTOSAVE_DELAY_MS
+#define UI_FLASH_AUTOSAVE_DELAY_MS      500U
 
-typedef struct
-{
-    uint32_t magic;
-    uint32_t version;
-    uint32_t vset_x100;
-    uint32_t iset_x100;
-    uint32_t checksum;
-} UIFlashDataV1_t;
-
-typedef struct
-{
-    uint32_t magic;
-    uint32_t version;
-    uint32_t vset_x100;
-    uint32_t iset_x100;
-    uint32_t ovp_x100;
-    uint32_t ocp_x100;
-    uint32_t opp_x10;
-    uint32_t checksum;
-} UIFlashDataV2_t;
-
-typedef struct
-{
-    uint32_t magic;
-    uint32_t version;
-    uint32_t vset_x100;
-    uint32_t iset_x100;
-    uint32_t ovp_x100;
-    uint32_t ocp_x100;
-    uint32_t opp_x10;
-    uint32_t sleep_temp_x10;
-    uint32_t buzzer_button_enable;
-    uint32_t theme;
-    uint32_t checksum;
-} UIFlashDataV3_t;
-
-typedef struct
-{
-    uint32_t magic;
-    uint32_t version;
-    uint32_t vset_x100;
-    uint32_t iset_x100;
-    uint32_t ovp_x100;
-    uint32_t ocp_x100;
-    uint32_t opp_x10;
-    uint32_t sleep_temp_x10;
-    uint32_t buzzer_button_enable;
-    uint32_t theme;
-    uint32_t solder_tip;
-    uint32_t checksum;
-} UIFlashDataV4_t;
-
-typedef struct
-{
-    uint32_t magic;
-    uint32_t version;
-    uint32_t vset_x100;
-    uint32_t iset_x100;
-    uint32_t ovp_x100;
-    uint32_t ocp_x100;
-    uint32_t opp_x10;
-    uint32_t sleep_temp_x10;
-    uint32_t buzzer_button_enable;
-    uint32_t theme;
-    uint32_t solder_tip;
-    uint32_t start_mode;
-    uint32_t response_mode;
-    uint32_t checksum;
-} UIFlashDataV5_t;
 
 typedef struct
 {
@@ -526,6 +561,7 @@ typedef struct
     uint32_t opp_x10;
 
     uint32_t sleep_temp_x10;
+
     uint32_t buzzer_button_enable;
     uint32_t theme;
     uint32_t solder_tip;
@@ -533,282 +569,296 @@ typedef struct
     uint32_t start_mode;
     uint32_t response_mode;
 
+    /*
+     * OPEN LOOP is still useful in pure BUCK:
+     * openloop_ratio is now direct BUCK duty.
+     */
     uint32_t control_mode;
     uint32_t openloop_ratio_x100;
 
     uint32_t checksum;
 } UIFlashData_t;
 
-static uint32_t ui_flash_checksum_v1(const UIFlashDataV1_t *d)
+
+/* ---------------------------------------------------------
+ * Small generic checksum.
+ * checksum must remain the LAST uint32_t in UIFlashData_t.
+ * --------------------------------------------------------- */
+static uint32_t ui_flash_checksum(
+    const UIFlashData_t *d)
 {
-    return d->magic ^ d->version ^ d->vset_x100 ^ d->iset_x100 ^ 0x5A5AA5A5U;
-}
+    const uint32_t *p =
+        (const uint32_t *)d;
 
-static uint32_t ui_flash_checksum_v2(const UIFlashDataV2_t *d)
-{
-    return d->magic ^ d->version ^ d->vset_x100 ^ d->iset_x100 ^
-           d->ovp_x100 ^ d->ocp_x100 ^ d->opp_x10 ^ 0x5A5AA5A5U;
-}
+    uint32_t x =
+        0x5A5AA5A5U;
 
-static uint32_t ui_flash_checksum_v3(const UIFlashDataV3_t *d)
-{
-    return d->magic ^ d->version ^ d->vset_x100 ^ d->iset_x100 ^
-           d->ovp_x100 ^ d->ocp_x100 ^ d->opp_x10 ^ d->sleep_temp_x10 ^
-           d->buzzer_button_enable ^ d->theme ^ 0x5A5AA5A5U;
-}
+    uint32_t words =
+        (uint32_t)(
+            sizeof(UIFlashData_t) /
+            sizeof(uint32_t)
+        ) - 1U;
 
-static uint32_t ui_flash_checksum_v4(const UIFlashDataV4_t *d)
-{
-    return d->magic ^ d->version ^ d->vset_x100 ^ d->iset_x100 ^
-           d->ovp_x100 ^ d->ocp_x100 ^ d->opp_x10 ^ d->sleep_temp_x10 ^
-           d->buzzer_button_enable ^ d->theme ^ d->solder_tip ^
-           0x5A5AA5A5U;
-}
-
-static uint32_t ui_flash_checksum_v5(const UIFlashDataV5_t *d)
-{
-    return d->magic ^ d->version ^ d->vset_x100 ^ d->iset_x100 ^
-           d->ovp_x100 ^ d->ocp_x100 ^ d->opp_x10 ^ d->sleep_temp_x10 ^
-           d->buzzer_button_enable ^ d->theme ^ d->solder_tip ^
-           d->start_mode ^ d->response_mode ^
-           0x5A5AA5A5U;
-}
-
-static uint32_t ui_flash_checksum(const UIFlashData_t *d)
-{
-    return d->magic ^ d->version ^
-           d->vset_x100 ^ d->iset_x100 ^
-           d->ovp_x100 ^ d->ocp_x100 ^ d->opp_x10 ^
-           d->sleep_temp_x10 ^
-           d->buzzer_button_enable ^
-           d->theme ^
-           d->solder_tip ^
-           d->start_mode ^
-           d->response_mode ^
-           d->control_mode ^
-           d->openloop_ratio_x100 ^
-           0x5A5AA5A5U;
-}
-
-static uint8_t ui_flash_read(float *vset, float *iset)
-{
-    /*
-     * Defaults for all legacy Flash versions.
-     */
-    flash_start_mode = BB_START_SOFT;
-    flash_response_mode = BB_RESPONSE_NORMAL;
-    flash_control_mode = BB_CONTROL_CLOSED;
-    flash_openloop_ratio = 0.50f;
-
-    const uint32_t *raw = (const uint32_t *)UI_FLASH_PAGE_ADDR;
-    if(raw[0] != UI_FLASH_MAGIC) return 0U;
-
-    if(raw[1] == UI_FLASH_VERSION_V1)
+    for(uint32_t k = 0U;
+        k < words;
+        k++)
     {
-        const UIFlashDataV1_t *d=(const UIFlashDataV1_t *)UI_FLASH_PAGE_ADDR;
-        if(d->checksum != ui_flash_checksum_v1(d)) return 0U;
-        float v=(float)d->vset_x100/100.0f, i=(float)d->iset_x100/100.0f;
-        if(v<VSET_MIN||v>VSET_MAX||i<ISET_MIN||i>ISET_MAX) return 0U;
-        *vset=v; *iset=i; return 1U;
+        x ^= p[k];
     }
 
-    if(raw[1] == UI_FLASH_VERSION_V2)
+    return x;
+}
+
+
+/* ---------------------------------------------------------
+ * Compare current Flash record with candidate.
+ * Avoid erase/program if nothing changed.
+ * --------------------------------------------------------- */
+static uint8_t ui_flash_same(
+    const UIFlashData_t *a,
+    const UIFlashData_t *b)
+{
+    const uint32_t *pa =
+        (const uint32_t *)a;
+
+    const uint32_t *pb =
+        (const uint32_t *)b;
+
+    uint32_t words =
+        (uint32_t)(
+            sizeof(UIFlashData_t) /
+            sizeof(uint32_t)
+        );
+
+    for(uint32_t k = 0U;
+        k < words;
+        k++)
     {
-        const UIFlashDataV2_t *d=(const UIFlashDataV2_t *)UI_FLASH_PAGE_ADDR;
-        if(d->checksum != ui_flash_checksum_v2(d)) return 0U;
-        float v=(float)d->vset_x100/100.0f, i=(float)d->iset_x100/100.0f;
-        float ovp=(float)d->ovp_x100/100.0f, ocp=(float)d->ocp_x100/100.0f, opp=(float)d->opp_x10/10.0f;
-        if(v<VSET_MIN||v>VSET_MAX||i<ISET_MIN||i>ISET_MAX||
-           ovp<PROTECT_OVP_MIN||ovp>PROTECT_OVP_MAX||
-           ocp<PROTECT_OCP_MIN||ocp>PROTECT_OCP_MAX||
-           opp<PROTECT_OPP_MIN||opp>PROTECT_OPP_MAX) return 0U;
-        *vset=v; *iset=i; protect_ovp=ovp; protect_ocp=ocp; protect_opp=opp; return 1U;
-    }
-
-    if(raw[1] == UI_FLASH_VERSION_V3)
-    {
-        const UIFlashDataV3_t *d=(const UIFlashDataV3_t *)UI_FLASH_PAGE_ADDR;
-        if(d->checksum != ui_flash_checksum_v3(d)) return 0U;
-        float v=(float)d->vset_x100/100.0f, i=(float)d->iset_x100/100.0f;
-        float ovp=(float)d->ovp_x100/100.0f, ocp=(float)d->ocp_x100/100.0f, opp=(float)d->opp_x10/10.0f;
-        float sl=(float)d->sleep_temp_x10/10.0f;
-        if(v<VSET_MIN||v>VSET_MAX||i<ISET_MIN||i>ISET_MAX||
-           ovp<PROTECT_OVP_MIN||ovp>PROTECT_OVP_MAX||
-           ocp<PROTECT_OCP_MIN||ocp>PROTECT_OCP_MAX||
-           opp<PROTECT_OPP_MIN||opp>PROTECT_OPP_MAX||
-           sl<SLEEP_TEMP_MIN||sl>SLEEP_TEMP_MAX||
-           d->buzzer_button_enable>1U||d->theme>(uint32_t)UI_THEME_LIGHT) return 0U;
-        *vset=v; *iset=i; protect_ovp=ovp; protect_ocp=ocp; protect_opp=opp;
-        sleep_temp=sl; buzzer_button_enable=(uint8_t)d->buzzer_button_enable;
-        ui_theme=(UITheme_t)d->theme;
-        solder_tip=SOLDER_TIP_C245;
-        return 1U;
-    }
-
-    if(raw[1] == UI_FLASH_VERSION_V4)
-    {
-        const UIFlashDataV4_t *d=(const UIFlashDataV4_t *)UI_FLASH_PAGE_ADDR;
-
-        if(d->checksum != ui_flash_checksum_v4(d))
-            return 0U;
-
-        float v=(float)d->vset_x100/100.0f;
-        float i=(float)d->iset_x100/100.0f;
-
-        float ovp=(float)d->ovp_x100/100.0f;
-        float ocp=(float)d->ocp_x100/100.0f;
-        float opp=(float)d->opp_x10/10.0f;
-        float sl=(float)d->sleep_temp_x10/10.0f;
-
-        if(v<VSET_MIN||v>VSET_MAX||
-           i<ISET_MIN||i>ISET_MAX||
-           ovp<PROTECT_OVP_MIN||ovp>PROTECT_OVP_MAX||
-           ocp<PROTECT_OCP_MIN||ocp>PROTECT_OCP_MAX||
-           opp<PROTECT_OPP_MIN||opp>PROTECT_OPP_MAX||
-           sl<SLEEP_TEMP_MIN||sl>SLEEP_TEMP_MAX||
-           d->buzzer_button_enable>1U||
-           d->theme>(uint32_t)UI_THEME_LIGHT||
-           d->solder_tip>(uint32_t)SOLDER_TIP_C210)
+        if(pa[k] != pb[k])
         {
             return 0U;
         }
-
-        *vset=v;
-        *iset=i;
-
-        protect_ovp=ovp;
-        protect_ocp=ocp;
-        protect_opp=opp;
-
-        sleep_temp=sl;
-        buzzer_button_enable=(uint8_t)d->buzzer_button_enable;
-        ui_theme=(UITheme_t)d->theme;
-        solder_tip=(SolderTip_t)d->solder_tip;
-
-        flash_start_mode = BB_START_SOFT;
-        flash_response_mode = BB_RESPONSE_NORMAL;
-
-        return 1U;
     }
-
-    if(raw[1] == UI_FLASH_VERSION_V5)
-    {
-        const UIFlashDataV5_t *d =
-            (const UIFlashDataV5_t *)UI_FLASH_PAGE_ADDR;
-
-        if(d->checksum != ui_flash_checksum_v5(d))
-            return 0U;
-
-        float v=(float)d->vset_x100/100.0f;
-        float i=(float)d->iset_x100/100.0f;
-
-        float ovp=(float)d->ovp_x100/100.0f;
-        float ocp=(float)d->ocp_x100/100.0f;
-        float opp=(float)d->opp_x10/10.0f;
-        float sl=(float)d->sleep_temp_x10/10.0f;
-
-        if(v<VSET_MIN||v>VSET_MAX||
-           i<ISET_MIN||i>ISET_MAX||
-           ovp<PROTECT_OVP_MIN||ovp>PROTECT_OVP_MAX||
-           ocp<PROTECT_OCP_MIN||ocp>PROTECT_OCP_MAX||
-           opp<PROTECT_OPP_MIN||opp>PROTECT_OPP_MAX||
-           sl<SLEEP_TEMP_MIN||sl>SLEEP_TEMP_MAX||
-           d->buzzer_button_enable>1U||
-           d->theme>(uint32_t)UI_THEME_LIGHT||
-           d->solder_tip>(uint32_t)SOLDER_TIP_C210||
-           d->start_mode>(uint32_t)BB_START_HARD||
-           d->response_mode>(uint32_t)BB_RESPONSE_SLOW)
-        {
-            return 0U;
-        }
-
-        *vset=v;
-        *iset=i;
-
-        protect_ovp=ovp;
-        protect_ocp=ocp;
-        protect_opp=opp;
-
-        sleep_temp=sl;
-        buzzer_button_enable=(uint8_t)d->buzzer_button_enable;
-        ui_theme=(UITheme_t)d->theme;
-        solder_tip=(SolderTip_t)d->solder_tip;
-
-        flash_start_mode =
-            (BBUI_StartMode_t)d->start_mode;
-
-        flash_response_mode =
-            (BBUI_ResponseMode_t)d->response_mode;
-
-        /*
-         * V5 did not have OPEN LOOP.
-         */
-        flash_control_mode =
-            BB_CONTROL_CLOSED;
-
-        flash_openloop_ratio =
-            0.50f;
-
-        return 1U;
-    }
-
-    if(raw[1] != UI_FLASH_VERSION) return 0U;
-    const UIFlashData_t *d=(const UIFlashData_t *)UI_FLASH_PAGE_ADDR;
-    if(d->checksum != ui_flash_checksum(d)) return 0U;
-    float v=(float)d->vset_x100/100.0f, i=(float)d->iset_x100/100.0f;
-    float ovp=(float)d->ovp_x100/100.0f, ocp=(float)d->ocp_x100/100.0f, opp=(float)d->opp_x10/10.0f;
-    float sl=(float)d->sleep_temp_x10/10.0f;
-    if(v<VSET_MIN||v>VSET_MAX||i<ISET_MIN||i>ISET_MAX||
-       ovp<PROTECT_OVP_MIN||ovp>PROTECT_OVP_MAX||
-       ocp<PROTECT_OCP_MIN||ocp>PROTECT_OCP_MAX||
-       opp<PROTECT_OPP_MIN||opp>PROTECT_OPP_MAX||
-       sl<SLEEP_TEMP_MIN||sl>SLEEP_TEMP_MAX||
-       d->buzzer_button_enable>1U||
-       d->theme>(uint32_t)UI_THEME_LIGHT||
-       d->solder_tip>(uint32_t)SOLDER_TIP_C210||
-       d->start_mode>(uint32_t)BB_START_HARD||
-       d->response_mode>(uint32_t)BB_RESPONSE_SLOW||
-       d->control_mode>(uint32_t)BB_CONTROL_OPEN||
-       d->openloop_ratio_x100>99U) return 0U;
-
-    *vset=v;
-    *iset=i;
-
-    protect_ovp=ovp;
-    protect_ocp=ocp;
-    protect_opp=opp;
-
-    sleep_temp=sl;
-    buzzer_button_enable=(uint8_t)d->buzzer_button_enable;
-    ui_theme=(UITheme_t)d->theme;
-    solder_tip=(SolderTip_t)d->solder_tip;
-
-    flash_start_mode =
-        (BBUI_StartMode_t)d->start_mode;
-
-    flash_response_mode =
-        (BBUI_ResponseMode_t)d->response_mode;
-
-    flash_control_mode =
-        (BBUI_ControlMode_t)d->control_mode;
-
-    flash_openloop_ratio =
-        (float)d->openloop_ratio_x100 /
-        100.0f;
 
     return 1U;
 }
 
-static uint8_t ui_flash_save(float vset, float iset)
+
+/* ---------------------------------------------------------
+ * Load current settings format only.
+ *
+ * Invalid/old Flash simply falls back to defaults.
+ * --------------------------------------------------------- */
+static uint8_t ui_flash_read(
+    float *vset,
+    float *iset)
 {
-    UIFlashData_t n;
-    n.magic=UI_FLASH_MAGIC; n.version=UI_FLASH_VERSION;
-    n.vset_x100=(uint32_t)(vset*100.0f+0.5f); n.iset_x100=(uint32_t)(iset*100.0f+0.5f);
-    n.ovp_x100=(uint32_t)(protect_ovp*100.0f+0.5f); n.ocp_x100=(uint32_t)(protect_ocp*100.0f+0.5f);
-    n.opp_x10=(uint32_t)(protect_opp*10.0f+0.5f); n.sleep_temp_x10=(uint32_t)(sleep_temp*10.0f+0.5f);
-    n.buzzer_button_enable=(uint32_t)buzzer_button_enable;
-    n.theme=(uint32_t)ui_theme;
-    n.solder_tip=(uint32_t)solder_tip;
+    flash_start_mode =
+        BB_START_SOFT;
+
+    flash_response_mode =
+        BB_RESPONSE_NORMAL;
+
+    flash_control_mode =
+        BB_CONTROL_CLOSED;
+
+    flash_openloop_ratio =
+        0.50f;
+
+    const UIFlashData_t *d =
+        (const UIFlashData_t *)
+        UI_FLASH_PAGE_ADDR;
+
+    if(d->magic != UI_FLASH_MAGIC ||
+       d->version != UI_FLASH_VERSION ||
+       d->checksum != ui_flash_checksum(d))
+    {
+        return 0U;
+    }
+
+    float v =
+        (float)d->vset_x100 /
+        100.0f;
+
+    float i =
+        (float)d->iset_x100 /
+        100.0f;
+
+    /*
+     * VSET/ISET are the critical fields.
+     * Reject the record if they are impossible.
+     */
+    if(v < VSET_MIN ||
+       v > VSET_MAX ||
+       i < ISET_MIN ||
+       i > ISET_MAX)
+    {
+        return 0U;
+    }
+
+    *vset = v;
+    *iset = i;
+
+    /*
+     * Remaining settings are clamped/defaulted instead of having
+     * a large legacy-validation tree.
+     */
+    protect_ovp =
+        clampf_ui(
+            (float)d->ovp_x100 / 100.0f,
+            PROTECT_OVP_MIN,
+            PROTECT_OVP_MAX
+        );
+
+    protect_ocp =
+        clampf_ui(
+            (float)d->ocp_x100 / 100.0f,
+            PROTECT_OCP_MIN,
+            PROTECT_OCP_MAX
+        );
+
+    protect_opp =
+        clampf_ui(
+            (float)d->opp_x10 / 10.0f,
+            PROTECT_OPP_MIN,
+            PROTECT_OPP_MAX
+        );
+
+    sleep_temp =
+        clampf_ui(
+            (float)d->sleep_temp_x10 / 10.0f,
+            SLEEP_TEMP_MIN,
+            SLEEP_TEMP_MAX
+        );
+
+    buzzer_button_enable =
+        (d->buzzer_button_enable != 0U)
+        ? 1U
+        : 0U;
+
+    ui_theme =
+        (d->theme <= (uint32_t)UI_THEME_LIGHT)
+        ? (UITheme_t)d->theme
+        : UI_THEME_DARK;
+
+    solder_tip =
+        (d->solder_tip <= (uint32_t)SOLDER_TIP_C210)
+        ? (SolderTip_t)d->solder_tip
+        : SOLDER_TIP_C245;
+
+    flash_start_mode =
+        (d->start_mode <= (uint32_t)BB_START_HARD)
+        ? (BBUI_StartMode_t)d->start_mode
+        : BB_START_SOFT;
+
+    flash_response_mode =
+        (d->response_mode <= (uint32_t)BB_RESPONSE_SLOW)
+        ? (BBUI_ResponseMode_t)d->response_mode
+        : BB_RESPONSE_NORMAL;
+
+    flash_control_mode =
+        (d->control_mode <= (uint32_t)BB_CONTROL_OPEN)
+        ? (BBUI_ControlMode_t)d->control_mode
+        : BB_CONTROL_CLOSED;
+
+    if((d->openloop_ratio_x100 >= 3U) &&
+       (d->openloop_ratio_x100 <= 97U))
+    {
+        flash_openloop_ratio =
+            (float)d->openloop_ratio_x100 /
+            100.0f;
+    }
+    else
+    {
+        flash_openloop_ratio =
+            0.50f;
+    }
+
+    return 1U;
+}
+
+
+/* ---------------------------------------------------------
+ * Save one compact record.
+ *
+ * SAFETY:
+ * Do not erase/program application Flash while converter is ON.
+ * --------------------------------------------------------- */
+static uint8_t ui_flash_save(
+    float vset,
+    float iset)
+{
+    if((ui != NULL) &&
+       ((ui->enable != 0U) ||
+        (ui->state != BBUI_STATE_OFF)))
+    {
+        /*
+         * Defer until output is safely OFF.
+         */
+        ui_flash_dirty =
+            1U;
+
+        ui_flash_dirty_tick =
+            HAL_GetTick();
+
+        return 0U;
+    }
+
+    UIFlashData_t n = {0};
+
+    n.magic =
+        UI_FLASH_MAGIC;
+
+    n.version =
+        UI_FLASH_VERSION;
+
+    n.vset_x100 =
+        (uint32_t)(
+            vset * 100.0f +
+            0.5f
+        );
+
+    n.iset_x100 =
+        (uint32_t)(
+            iset * 100.0f +
+            0.5f
+        );
+
+    n.ovp_x100 =
+        (uint32_t)(
+            protect_ovp * 100.0f +
+            0.5f
+        );
+
+    n.ocp_x100 =
+        (uint32_t)(
+            protect_ocp * 100.0f +
+            0.5f
+        );
+
+    n.opp_x10 =
+        (uint32_t)(
+            protect_opp * 10.0f +
+            0.5f
+        );
+
+    n.sleep_temp_x10 =
+        (uint32_t)(
+            sleep_temp * 10.0f +
+            0.5f
+        );
+
+    n.buzzer_button_enable =
+        (uint32_t)
+        buzzer_button_enable;
+
+    n.theme =
+        (uint32_t)
+        ui_theme;
+
+    n.solder_tip =
+        (uint32_t)
+        solder_tip;
 
     n.start_mode =
         (ui != NULL)
@@ -825,46 +875,171 @@ static uint8_t ui_flash_save(float vset, float iset)
         ? (uint32_t)ui->control_mode
         : (uint32_t)BB_CONTROL_CLOSED;
 
-    float ratio_to_save =
+    float ratio =
         (ui != NULL)
         ? ui->openloop_ratio
         : 0.50f;
 
-    ratio_to_save =
+    ratio =
         clampf_ui(
-            ratio_to_save,
-            0.00f,
-            0.99f
+            ratio,
+            0.03f,
+            0.97f
         );
 
     n.openloop_ratio_x100 =
         (uint32_t)(
-            ratio_to_save *
-            100.0f +
+            ratio * 100.0f +
             0.5f
         );
 
-    n.checksum=ui_flash_checksum(&n);
-    const UIFlashData_t *o=(const UIFlashData_t *)UI_FLASH_PAGE_ADDR;
-    if(o->magic==n.magic&&o->version==n.version&&o->vset_x100==n.vset_x100&&o->iset_x100==n.iset_x100&&
-       o->ovp_x100==n.ovp_x100&&o->ocp_x100==n.ocp_x100&&o->opp_x10==n.opp_x10&&
-       o->sleep_temp_x10==n.sleep_temp_x10&&o->buzzer_button_enable==n.buzzer_button_enable&&
-       o->theme==n.theme&&o->solder_tip==n.solder_tip&&
-       o->start_mode==n.start_mode&&o->response_mode==n.response_mode&&
-       o->control_mode==n.control_mode&&
-       o->openloop_ratio_x100==n.openloop_ratio_x100&&
-       o->checksum==n.checksum) return 1U;
+    n.checksum =
+        ui_flash_checksum(&n);
 
-    HAL_FLASH_Unlock(); FLASH_EraseInitTypeDef e={0}; uint32_t pe=0U;
-    e.TypeErase=FLASH_TYPEERASE_PAGES; e.PageAddress=UI_FLASH_PAGE_ADDR; e.NbPages=1U;
-    if(HAL_FLASHEx_Erase(&e,&pe)!=HAL_OK){HAL_FLASH_Lock();return 0U;}
-    const uint16_t *s=(const uint16_t *)&n; uint32_t a=UI_FLASH_PAGE_ADDR;
-    for(uint32_t k=0U;k<sizeof(UIFlashData_t)/2U;k++,a+=2U)
+    const UIFlashData_t *old =
+        (const UIFlashData_t *)
+        UI_FLASH_PAGE_ADDR;
+
+    if(ui_flash_same(
+           old,
+           &n) != 0U)
     {
-        if(HAL_FLASH_Program(FLASH_TYPEPROGRAM_HALFWORD,a,s[k])!=HAL_OK){HAL_FLASH_Lock();return 0U;}
+        return 1U;
     }
-    HAL_FLASH_Lock(); return 1U;
+
+    HAL_FLASH_Unlock();
+
+    FLASH_EraseInitTypeDef erase = {0};
+    uint32_t page_error = 0U;
+
+    erase.TypeErase =
+        FLASH_TYPEERASE_PAGES;
+
+    erase.PageAddress =
+        UI_FLASH_PAGE_ADDR;
+
+    erase.NbPages =
+        1U;
+
+    if(HAL_FLASHEx_Erase(
+           &erase,
+           &page_error) != HAL_OK)
+    {
+        HAL_FLASH_Lock();
+        return 0U;
+    }
+
+    const uint16_t *src =
+        (const uint16_t *)&n;
+
+    uint32_t addr =
+        UI_FLASH_PAGE_ADDR;
+
+    uint32_t halfwords =
+        (uint32_t)(
+            sizeof(UIFlashData_t) /
+            sizeof(uint16_t)
+        );
+
+    for(uint32_t k = 0U;
+        k < halfwords;
+        k++, addr += 2U)
+    {
+        if(HAL_FLASH_Program(
+               FLASH_TYPEPROGRAM_HALFWORD,
+               addr,
+               src[k]) != HAL_OK)
+        {
+            HAL_FLASH_Lock();
+            return 0U;
+        }
+    }
+
+    HAL_FLASH_Lock();
+
+    /*
+     * Verify from Flash after programming.
+     */
+    const UIFlashData_t *verify =
+        (const UIFlashData_t *)
+        UI_FLASH_PAGE_ADDR;
+
+    if(verify->magic != UI_FLASH_MAGIC ||
+       verify->version != UI_FLASH_VERSION ||
+       verify->checksum !=
+           ui_flash_checksum(verify))
+    {
+        return 0U;
+    }
+
+    return 1U;
 }
+
+
+/* =========================================================
+ * DEFERRED FLASH SAVE
+ * ========================================================= */
+
+static void ui_flash_mark_dirty(void)
+{
+    ui_flash_dirty =
+        1U;
+
+    ui_flash_dirty_tick =
+        HAL_GetTick();
+}
+
+
+static void ui_flash_autosave_task(void)
+{
+    if((ui == NULL) ||
+       (ui_flash_dirty == 0U))
+    {
+        return;
+    }
+
+    /*
+     * Never store temporary C245/C210 supply setpoints.
+     */
+    if(!is_live_screen())
+    {
+        return;
+    }
+
+    /*
+     * Never stall the CC/CV loop with a Flash page erase.
+     */
+    if((ui->enable != 0U) ||
+       (ui->state != BBUI_STATE_OFF))
+    {
+        return;
+    }
+
+    uint32_t now =
+        HAL_GetTick();
+
+    if((uint32_t)(
+           now -
+           ui_flash_dirty_tick
+       ) <
+       UI_FLASH_AUTOSAVE_DELAY_MS)
+    {
+        return;
+    }
+
+    ui_flash_last_save_ok =
+        ui_flash_save(
+            ui->vset,
+            ui->iset
+        );
+
+    if(ui_flash_last_save_ok != 0U)
+    {
+        ui_flash_dirty =
+            0U;
+    }
+}
+
 
 /* =========================================================
  * DISPLAY / UPDATE
@@ -900,12 +1075,22 @@ typedef enum
     UI_MODE_GRAPH
 } UIMode_t;
 
+/*
+ * Forward declaration:
+ * fault_reset_and_restart() calls this function before its
+ * full definition later in the file.
+ *
+ * Must be declared AFTER UIMode_t is defined.
+ */
+static void enter_live_mode(UIMode_t mode);
+
 typedef enum
 {
     SCREEN_NUMBER = 0,
     SCREEN_GRAPH,
     SCREEN_MENU,
-    SCREEN_SOLDER
+    SCREEN_SOLDER,
+    SCREEN_FAULT
 } Screen_t;
 
 /*
@@ -957,9 +1142,16 @@ static float
 solder_backup_openloop_ratio =
     0.50f;
 
+/*
+ * PB11 holder state is intentionally NOT debounced continuously.
+ * It is sampled only during a quiet heater-OFF window.
+ */
 static GPIO_PinState sleep_raw_last = GPIO_PIN_SET;
 static GPIO_PinState sleep_stable = GPIO_PIN_SET;
-static uint32_t sleep_changed_tick = 0U;
+
+/* Start time of the current heater-OFF window. */
+static uint32_t sleep_off_tick = 0U;
+static uint8_t sleep_off_tracking = 0U;
 
 /*
  * PB9 is now short/long aware:
@@ -1148,32 +1340,15 @@ static uint32_t vbtn_press_tick = 0U;
 #define GRAPH_W                        (GRAPH_X1 - GRAPH_X0 + 1)
 #define GRAPH_H                        (GRAPH_Y1 - GRAPH_Y0 + 1)
 
-#define GRAPH_PLOT_X0                  (GRAPH_X0 + 1)
-#define GRAPH_PLOT_X1                  (GRAPH_X1 - 1)
-#define GRAPH_PLOT_Y0                  (GRAPH_Y0 + 1)
-#define GRAPH_PLOT_Y1                  (GRAPH_Y1 - 1)
-
-#define GRAPH_PLOT_W                   (GRAPH_PLOT_X1 - GRAPH_PLOT_X0 + 1)
-#define GRAPH_PLOT_H                   (GRAPH_PLOT_Y1 - GRAPH_PLOT_Y0 + 1)
-
-/*
- * Strip-chart scrolling:
- * every new sample is placed at the RIGHT edge,
- * all older samples move LEFT by 2 pixels.
- *
- * 2 px/sample keeps the STM32F103 + SPI TFT redraw load reasonable.
- */
-#define GRAPH_SCROLL_STEP_PX           2U
-#define GRAPH_HISTORY_CAP              (((GRAPH_PLOT_W - 1U) / GRAPH_SCROLL_STEP_PX) + 1U)
-
 #define GRAPH_SAMPLE_MS                250U
-#define GRAPH_VMAX                     30.0f
-#define GRAPH_IMAX                     10.0f
+#define GRAPH_VMAX                     50.0f
+#define GRAPH_IMAX                     12.0f
 
-static int16_t graph_hist_v[GRAPH_HISTORY_CAP];
-static int16_t graph_hist_i[GRAPH_HISTORY_CAP];
-static uint16_t graph_hist_count = 0U;
-
+static uint16_t graph_head = 0U;
+static int16_t graph_last_x = -1;
+static int16_t graph_last_yv = -1;
+static int16_t graph_last_yi = -1;
+static uint8_t graph_has_last = 0U;
 static uint32_t graph_tick = 0U;
 
 /* =========================================================
@@ -1856,8 +2031,8 @@ static void draw_set_value_at(uint8_t is_voltage,
             "%.2f",
             clampf_ui(
                 value,
-                0.00f,
-                0.99f
+                0.03f,
+                0.97f
             )
         );
     }
@@ -2051,243 +2226,46 @@ static int graph_map_v(float v)
 {
     v = clampf_ui(v, 0.0f, GRAPH_VMAX);
 
-    return GRAPH_PLOT_Y1 -
+    return GRAPH_Y1 -
         (int)((v / GRAPH_VMAX) *
-        (float)(GRAPH_PLOT_H - 1));
+        (float)(GRAPH_H - 1));
 }
 
 static int graph_map_i(float i)
 {
     i = clampf_ui(i, 0.0f, GRAPH_IMAX);
 
-    return GRAPH_PLOT_Y1 -
+    return GRAPH_Y1 -
         (int)((i / GRAPH_IMAX) *
-        (float)(GRAPH_PLOT_H - 1));
+        (float)(GRAPH_H - 1));
 }
 
-static void graph_draw_grid_inside(void)
+static void graph_restore_grid_column(int x)
 {
-    for(uint8_t k = 1U; k < 4U; k++)
-    {
-        uint16_t y =
-            (uint16_t)(
-                GRAPH_Y0 +
-                (GRAPH_H * k) / 4U
-            );
+    int y1 = GRAPH_Y0 + GRAPH_H / 4;
+    int y2 = GRAPH_Y0 + GRAPH_H / 2;
+    int y3 = GRAPH_Y0 + 3 * GRAPH_H / 4;
 
-        for(uint16_t x = GRAPH_PLOT_X0;
-            x <= GRAPH_PLOT_X1;
-            x += 4U)
-        {
-            ST7789_DrawPixel(
-                x,
-                y,
-                C_GRID
-            );
-        }
-    }
+    ST7789_DrawPixel((uint16_t)x, (uint16_t)y1, C_GRID);
+    ST7789_DrawPixel((uint16_t)x, (uint16_t)y2, C_GRID);
+    ST7789_DrawPixel((uint16_t)x, (uint16_t)y3, C_GRID);
 }
 
-
-/*
- * Erase ONLY the previously drawn traces.
- *
- * Do not clear the whole graph rectangle on every sample.
- * Clearing the entire plot caused a visible blank frame and
- * therefore strong TFT flicker.
- */
-static void graph_erase_history(void)
+static void graph_clear_column(int x)
 {
-    if(graph_hist_count == 0U)
+    if(x < GRAPH_X0 || x > GRAPH_X1)
         return;
 
-    int first_x =
-        GRAPH_PLOT_X1 -
-        (int)(
-            (graph_hist_count - 1U) *
-            GRAPH_SCROLL_STEP_PX
-        );
+    ST7789_DrawFilledRectangle(
+        (uint16_t)x,
+        GRAPH_Y0,
+        1U,
+        GRAPH_H,
+        C_BG
+    );
 
-    if(graph_hist_count == 1U)
-    {
-        ST7789_DrawPixel(
-            GRAPH_PLOT_X1,
-            (uint16_t)graph_hist_v[0],
-            C_BG
-        );
-
-        ST7789_DrawPixel(
-            GRAPH_PLOT_X1,
-            (uint16_t)graph_hist_i[0],
-            C_BG
-        );
-
-        return;
-    }
-
-    for(uint16_t n = 1U;
-        n < graph_hist_count;
-        n++)
-    {
-        int x0 =
-            first_x +
-            (int)(
-                (n - 1U) *
-                GRAPH_SCROLL_STEP_PX
-            );
-
-        int x1 =
-            first_x +
-            (int)(
-                n *
-                GRAPH_SCROLL_STEP_PX
-            );
-
-        draw_line_fast(
-            x0,
-            graph_hist_v[n - 1U],
-            x1,
-            graph_hist_v[n],
-            C_BG
-        );
-
-        draw_line_fast(
-            x0,
-            graph_hist_i[n - 1U],
-            x1,
-            graph_hist_i[n],
-            C_BG
-        );
-    }
+    graph_restore_grid_column(x);
 }
-
-
-static void graph_render_history(void)
-{
-    if(graph_hist_count == 0U)
-        return;
-
-    int first_x =
-        GRAPH_PLOT_X1 -
-        (int)(
-            (graph_hist_count - 1U) *
-            GRAPH_SCROLL_STEP_PX
-        );
-
-    for(uint16_t n = 1U;
-        n < graph_hist_count;
-        n++)
-    {
-        int x0 =
-            first_x +
-            (int)(
-                (n - 1U) *
-                GRAPH_SCROLL_STEP_PX
-            );
-
-        int x1 =
-            first_x +
-            (int)(
-                n *
-                GRAPH_SCROLL_STEP_PX
-            );
-
-        draw_line_fast(
-            x0,
-            graph_hist_v[n - 1U],
-            x1,
-            graph_hist_v[n],
-            C_VOLT
-        );
-
-        draw_line_fast(
-            x0,
-            graph_hist_i[n - 1U],
-            x1,
-            graph_hist_i[n],
-            C_CURR
-        );
-    }
-
-    if(graph_hist_count == 1U)
-    {
-        ST7789_DrawPixel(
-            GRAPH_PLOT_X1,
-            (uint16_t)graph_hist_v[0],
-            C_VOLT
-        );
-
-        ST7789_DrawPixel(
-            GRAPH_PLOT_X1,
-            (uint16_t)graph_hist_i[0],
-            C_CURR
-        );
-    }
-}
-
-
-/*
- * Update one strip-chart sample without blanking the whole plot.
- *
- * Sequence:
- *   1. erase old trace only
- *   2. shift history in RAM
- *   3. restore dotted grid
- *   4. draw new trace
- */
-static void graph_push_scroll(int yv,
-                              int yi)
-{
-    /*
-     * Remove only the old curves; the plot background remains
-     * continuously visible, eliminating the full-screen flash.
-     */
-    graph_erase_history();
-
-    if(graph_hist_count <
-       GRAPH_HISTORY_CAP)
-    {
-        graph_hist_v[graph_hist_count] =
-            (int16_t)yv;
-
-        graph_hist_i[graph_hist_count] =
-            (int16_t)yi;
-
-        graph_hist_count++;
-    }
-    else
-    {
-        /*
-         * Shift history one sample to the left in RAM.
-         * Only ~150 points, so this is inexpensive.
-         */
-        for(uint16_t n = 1U;
-            n < GRAPH_HISTORY_CAP;
-            n++)
-        {
-            graph_hist_v[n - 1U] =
-                graph_hist_v[n];
-
-            graph_hist_i[n - 1U] =
-                graph_hist_i[n];
-        }
-
-        graph_hist_v[GRAPH_HISTORY_CAP - 1U] =
-            (int16_t)yv;
-
-        graph_hist_i[GRAPH_HISTORY_CAP - 1U] =
-            (int16_t)yi;
-    }
-
-    /*
-     * Erasing curves also erases any grid pixels they crossed.
-     * Restore the sparse grid first, then draw the new curves.
-     */
-    graph_draw_grid_inside();
-
-    graph_render_history();
-}
-
 
 static void draw_graph_static(void)
 {
@@ -2305,7 +2283,18 @@ static void draw_graph_static(void)
     ST7789_DrawFilledRectangle(GRAPH_X0, GRAPH_Y0, 1, GRAPH_H, C_GRID);
     ST7789_DrawFilledRectangle(GRAPH_X1, GRAPH_Y0, 1, GRAPH_H, C_GRID);
 
-    graph_draw_grid_inside();
+    for(uint8_t k = 1U; k < 4U; k++)
+    {
+        uint16_t y =
+            (uint16_t)(GRAPH_Y0 + (GRAPH_H * k) / 4U);
+
+        for(uint16_t x = GRAPH_X0;
+            x <= GRAPH_X1;
+            x += 4U)
+        {
+            ST7789_DrawPixel(x, y, C_GRID);
+        }
+    }
 
     /*
      * Same control/status area as NUMBER:
@@ -2349,7 +2338,9 @@ static void draw_graph_static(void)
         C_BG
     );
 
-    graph_hist_count = 0U;
+    graph_head = 0U;
+    graph_has_last = 0U;
+    graph_last_x = -1;
     graph_tick = HAL_GetTick();
 
     invalidate_main_cache();
@@ -2424,42 +2415,63 @@ static void draw_graph_set_field(uint8_t is_voltage)
 
 static void graph_sample_task(void)
 {
-    uint32_t now =
-        HAL_GetTick();
+    uint32_t now = HAL_GetTick();
 
     uint32_t graph_ms =
         response_graph_sample_ms();
 
-    if((uint32_t)(
-           now -
-           graph_tick
-       ) <
-       graph_ms)
-    {
+    if((uint32_t)(now - graph_tick) < graph_ms)
         return;
+
+    graph_tick = now;
+
+    int x = GRAPH_X0 + (int)graph_head;
+    int yv = graph_map_v(disp_vout);
+    int yi = graph_map_i(disp_iout);
+
+    graph_clear_column(x);
+
+    if(x < GRAPH_X1)
+        graph_clear_column(x + 1);
+
+    if(graph_has_last &&
+       graph_last_x >= GRAPH_X0 &&
+       x > graph_last_x)
+    {
+        draw_line_fast(
+            graph_last_x,
+            graph_last_yv,
+            x,
+            yv,
+            C_VOLT
+        );
+
+        draw_line_fast(
+            graph_last_x,
+            graph_last_yi,
+            x,
+            yi,
+            C_CURR
+        );
+    }
+    else
+    {
+        ST7789_DrawPixel((uint16_t)x, (uint16_t)yv, C_VOLT);
+        ST7789_DrawPixel((uint16_t)x, (uint16_t)yi, C_CURR);
     }
 
-    graph_tick =
-        now;
+    graph_last_x = (int16_t)x;
+    graph_last_yv = (int16_t)yv;
+    graph_last_yi = (int16_t)yi;
+    graph_has_last = 1U;
 
-    int yv =
-        graph_map_v(
-            disp_vout
-        );
+    graph_head++;
 
-    int yi =
-        graph_map_i(
-            disp_iout
-        );
-
-    /*
-     * Push newest sample on the right.
-     * Existing trace visually shifts left.
-     */
-    graph_push_scroll(
-        yv,
-        yi
-    );
+    if(graph_head >= GRAPH_W)
+    {
+        graph_head = 0U;
+        graph_has_last = 0U;
+    }
 
     draw_graph_live_info();
 }
@@ -2624,6 +2636,495 @@ static void draw_menu(void)
         C_BG
     );
 }
+
+/* =========================================================
+ * FULL-SCREEN FAULT MODE
+ * ========================================================= */
+
+static const char *fault_name(void)
+{
+    if(fault_snapshot.fault ==
+       PROTECT_FAULT_OVP)
+        return "OVP";
+
+    if(fault_snapshot.fault ==
+       PROTECT_FAULT_OCP)
+        return "OCP";
+
+    if(fault_snapshot.fault ==
+       PROTECT_FAULT_OPP)
+        return "OPP";
+
+    if(fault_snapshot.fault ==
+       PROTECT_FAULT_EXTERNAL)
+    {
+        switch(fault_snapshot.power_fault_code)
+        {
+            case POWER_FAULT_HARD_CURRENT:
+                return "HARD CURRENT";
+
+            case POWER_FAULT_TEMP:
+                return "POWER TEMP";
+
+            case POWER_FAULT_VIN_LOW:
+                return "VIN LOW";
+
+            default:
+                return "EXTERNAL";
+        }
+    }
+
+    return "UNKNOWN";
+}
+
+
+static void fault_capture_snapshot(ProtectFault_t fault)
+{
+    memset(
+        &fault_snapshot,
+        0,
+        sizeof(fault_snapshot)
+    );
+
+    fault_snapshot.fault =
+        fault;
+
+    fault_snapshot.power_fault_code =
+        g_power_fault_code;
+
+    /*
+     * Faults raised in main.c have a snapshot taken in the
+     * 5-kHz ISR BEFORE MOE/output are disabled.
+     */
+    if((fault ==
+        PROTECT_FAULT_EXTERNAL) &&
+       (g_power_fault_code !=
+        POWER_FAULT_NONE))
+    {
+        fault_snapshot.vin =
+            g_power_fault_vin;
+
+        fault_snapshot.vout =
+            g_power_fault_vout;
+
+        fault_snapshot.current =
+            g_power_fault_current;
+
+        fault_snapshot.temp =
+            g_power_fault_temp;
+
+        fault_snapshot.trip_value =
+            g_power_fault_value;
+
+        fault_snapshot.trip_limit =
+            g_power_fault_limit;
+    }
+    else if(ui != NULL)
+    {
+        /*
+         * UI OVP/OCP/OPP are captured immediately when the
+         * debounced violation is committed.
+         */
+        fault_snapshot.vin =
+            ui->vin;
+
+        fault_snapshot.vout =
+            ui->vout;
+
+        fault_snapshot.current =
+            ui->current;
+
+        fault_snapshot.temp =
+            ui->temp;
+
+        switch(fault)
+        {
+            case PROTECT_FAULT_OVP:
+                fault_snapshot.trip_value =
+                    ui->vout;
+
+                fault_snapshot.trip_limit =
+                    protect_ovp;
+                break;
+
+            case PROTECT_FAULT_OCP:
+                fault_snapshot.trip_value =
+                    ui->current;
+
+                fault_snapshot.trip_limit =
+                    protect_ocp;
+                break;
+
+            case PROTECT_FAULT_OPP:
+                fault_snapshot.trip_value =
+                    ui->vout *
+                    ui->current;
+
+                fault_snapshot.trip_limit =
+                    protect_opp;
+                break;
+
+            default:
+                break;
+        }
+    }
+
+    fault_snapshot.power =
+        fault_snapshot.vout *
+        fault_snapshot.current;
+
+    fault_snapshot.valid =
+        1U;
+}
+
+
+static void draw_fault_screen(void)
+{
+    char buf[64];
+
+    /*
+     * Fault screen deliberately ignores LIGHT/DARK theme.
+     * Red background makes a latched protection state obvious.
+     */
+    ST7789_FillScreen(
+        ST7789_COLOR_RED
+    );
+
+    ST7789_PutString(
+        88,
+        8,
+        "FAULT",
+        3,
+        ST7789_COLOR_WHITE,
+        ST7789_COLOR_RED
+    );
+
+    ST7789_DrawFilledRectangle(
+        12,
+        48,
+        296,
+        2,
+        ST7789_COLOR_WHITE
+    );
+
+    ST7789_PutString(
+        12,
+        58,
+        fault_name(),
+        2,
+        ST7789_COLOR_WHITE,
+        ST7789_COLOR_RED
+    );
+
+    snprintf(
+        buf,
+        sizeof(buf),
+        "VIN  %.2f V",
+        fault_snapshot.vin
+    );
+
+    ST7789_PutString(
+        12,
+        92,
+        buf,
+        1,
+        ST7789_COLOR_WHITE,
+        ST7789_COLOR_RED
+    );
+
+    snprintf(
+        buf,
+        sizeof(buf),
+        "VOUT %.2f V",
+        fault_snapshot.vout
+    );
+
+    ST7789_PutString(
+        166,
+        92,
+        buf,
+        1,
+        ST7789_COLOR_WHITE,
+        ST7789_COLOR_RED
+    );
+
+    snprintf(
+        buf,
+        sizeof(buf),
+        "IOUT %.2f A",
+        fault_snapshot.current
+    );
+
+    ST7789_PutString(
+        12,
+        112,
+        buf,
+        1,
+        ST7789_COLOR_WHITE,
+        ST7789_COLOR_RED
+    );
+
+    snprintf(
+        buf,
+        sizeof(buf),
+        "TEMP %.1f C",
+        fault_snapshot.temp
+    );
+
+    ST7789_PutString(
+        166,
+        112,
+        buf,
+        1,
+        ST7789_COLOR_WHITE,
+        ST7789_COLOR_RED
+    );
+
+    snprintf(
+        buf,
+        sizeof(buf),
+        "POWER %.1f W",
+        fault_snapshot.power
+    );
+
+    ST7789_PutString(
+        12,
+        132,
+        buf,
+        1,
+        ST7789_COLOR_WHITE,
+        ST7789_COLOR_RED
+    );
+
+    /*
+     * Cause-specific trip value / threshold.
+     */
+    if(fault_snapshot.fault ==
+       PROTECT_FAULT_OVP)
+    {
+        snprintf(
+            buf,
+            sizeof(buf),
+            "TRIP %.2fV > %.2fV",
+            fault_snapshot.trip_value,
+            fault_snapshot.trip_limit
+        );
+    }
+    else if(fault_snapshot.fault ==
+            PROTECT_FAULT_OCP)
+    {
+        snprintf(
+            buf,
+            sizeof(buf),
+            "TRIP %.2fA > %.2fA",
+            fault_snapshot.trip_value,
+            fault_snapshot.trip_limit
+        );
+    }
+    else if(fault_snapshot.fault ==
+            PROTECT_FAULT_OPP)
+    {
+        snprintf(
+            buf,
+            sizeof(buf),
+            "TRIP %.1fW > %.1fW",
+            fault_snapshot.trip_value,
+            fault_snapshot.trip_limit
+        );
+    }
+    else if((fault_snapshot.fault ==
+             PROTECT_FAULT_EXTERNAL) &&
+            (fault_snapshot.power_fault_code ==
+             POWER_FAULT_HARD_CURRENT))
+    {
+        snprintf(
+            buf,
+            sizeof(buf),
+            "IFAST %.2fA > %.2fA",
+            fault_snapshot.trip_value,
+            fault_snapshot.trip_limit
+        );
+    }
+    else if((fault_snapshot.fault ==
+             PROTECT_FAULT_EXTERNAL) &&
+            (fault_snapshot.power_fault_code ==
+             POWER_FAULT_TEMP))
+    {
+        snprintf(
+            buf,
+            sizeof(buf),
+            "TEMP %.1fC > %.1fC",
+            fault_snapshot.trip_value,
+            fault_snapshot.trip_limit
+        );
+    }
+    else if((fault_snapshot.fault ==
+             PROTECT_FAULT_EXTERNAL) &&
+            (fault_snapshot.power_fault_code ==
+             POWER_FAULT_VIN_LOW))
+    {
+        snprintf(
+            buf,
+            sizeof(buf),
+            "VIN %.2fV < %.2fV",
+            fault_snapshot.trip_value,
+            fault_snapshot.trip_limit
+        );
+    }
+    else
+    {
+        snprintf(
+            buf,
+            sizeof(buf),
+            "FAULT CODE %u",
+            (unsigned int)
+            fault_snapshot.power_fault_code
+        );
+    }
+
+    ST7789_PutString(
+        12,
+        158,
+        buf,
+        2,
+        ST7789_COLOR_YELLOW,
+        ST7789_COLOR_RED
+    );
+
+    ST7789_DrawFilledRectangle(
+        12,
+        194,
+        296,
+        2,
+        ST7789_COLOR_WHITE
+    );
+
+    ST7789_PutString(
+        34,
+        207,
+        "PB9: RESET + RESTART",
+        1,
+        ST7789_COLOR_WHITE,
+        ST7789_COLOR_RED
+    );
+}
+
+
+static void enter_fault_screen(void)
+{
+    screen =
+        SCREEN_FAULT;
+
+    draw_fault_screen();
+
+    /*
+     * Normal live-screen dirty flags are irrelevant while FAULT
+     * owns the complete LCD.
+     */
+    vset_dirty =
+        0U;
+
+    iset_dirty =
+        0U;
+
+    status_dirty =
+        0U;
+
+    runtime_dirty =
+        0U;
+}
+
+
+static void fault_reset_and_restart(void)
+{
+    if(ui == NULL)
+        return;
+
+    /*
+     * Clear latched software/main fault state first.
+     * This leaves output OFF.
+     */
+    clear_protection_fault();
+
+#if SOLDER_ROUTE_ENABLE
+    /*
+     * A restart always returns to normal POWER mode.
+     */
+    HAL_GPIO_WritePin(
+        SOLDER_ROUTE_PORT,
+        SOLDER_ROUTE_PIN,
+        GPIO_PIN_RESET
+    );
+#endif
+
+    /*
+     * Restart runtime/display history from zero.
+     */
+    runtime_elapsed_sec =
+        0U;
+
+    runtime_ms_remainder =
+        0U;
+
+    runtime_last_tick =
+        HAL_GetTick();
+
+    runtime_prev_enable =
+        0U;
+
+    runtime_dirty =
+        1U;
+
+    /*
+     * Seed display filters from the latest measurements instead
+     * of carrying old pre-fault filter history.
+     */
+    disp_vout =
+        ui->vout;
+
+    disp_iout =
+        ui->current;
+
+    disp_vin =
+        ui->vin;
+
+    disp_temp =
+        ui->temp;
+
+    filter_init =
+        1U;
+
+    /*
+     * One PB9 press means:
+     *
+     *   clear fault
+     *   -> main NUMBER screen
+     *   -> output ON again
+     *   -> main.c sees a fresh OFF->ON edge and resets CV/CC PI,
+     *      input-droop state and soft-start exactly like a new run.
+     */
+    ui->enable =
+        1U;
+
+    ui->state =
+        BBUI_STATE_CV;
+
+    protect_prev_enable =
+        0U;
+
+    protection_arm();
+
+    fault_snapshot.valid =
+        0U;
+
+    enter_live_mode(
+        UI_MODE_NUMBER
+    );
+
+    status_dirty =
+        1U;
+}
+
 
 /* =========================================================
  * SCREEN CONTROL
@@ -2900,24 +3401,17 @@ static void enter_solder_mode(void)
     screen = SCREEN_SOLDER;
 
     /*
-     * Re-synchronize holder input when entering SOLDER.
-     * This avoids carrying a stale debounce state from POWER mode.
+     * Sleep detection now lives entirely inside UI_Solider.c.
+     *
+     * UI.c only passes the configured sleep temperature here.
+     * UI_Solider_Enter() starts with sol_sleep = 0, therefore
+     * this call updates sol_sleep_temp without detecting PB11.
+     *
+     * PB11 itself will be checked during the first quiet
+     * heater-OFF sensing window, BEFORE the temperature ADC.
      */
-    sleep_raw_last =
-        HAL_GPIO_ReadPin(
-            SOLDER_SLEEP_PORT,
-            SOLDER_SLEEP_PIN
-        );
-
-    sleep_stable =
-        sleep_raw_last;
-
-    sleep_changed_tick =
-        HAL_GetTick();
-
     UI_Solider_SetSleep(
-        sleep_stable ==
-        SOLDER_SLEEP_ACTIVE,
+        UI_Solider_IsSleeping(),
         sleep_temp
     );
 
@@ -2968,78 +3462,17 @@ static void exit_solder_mode(void)
     enter_live_mode(solder_return_ui_mode);
 }
 
-/* PB11 holder/sleep detector. */
+/* PB11 holder/sleep detector.
+ *
+ * Sleep detection has moved to UI_Solider.c so it occurs inside
+ * the heater-OFF sensing window, immediately BEFORE ADC sampling.
+ *
+ * Keep this function as a no-op to avoid changing the surrounding
+ * UI task structure.
+ */
 static void solder_sleep_task(void)
 {
-    GPIO_PinState raw =
-        HAL_GPIO_ReadPin(
-            SOLDER_SLEEP_PORT,
-            SOLDER_SLEEP_PIN
-        );
-
-    uint32_t now =
-        HAL_GetTick();
-
-    /*
-     * Raw edge detected:
-     * restart debounce timer.
-     */
-    if(raw != sleep_raw_last)
-    {
-        sleep_raw_last =
-            raw;
-
-        sleep_changed_tick =
-            now;
-    }
-
-    /*
-     * Wait until the new level has remained stable long enough.
-     */
-    if((uint32_t)(
-           now -
-           sleep_changed_tick
-       ) <
-       SOLDER_SLEEP_DEBOUNCE_MS)
-    {
-        return;
-    }
-
-    /*
-     * Accept the debounced level.
-     *
-     * Important:
-     * update sleep_stable even outside SOLDER so the software always
-     * knows the real holder state.
-     */
-    sleep_stable =
-        raw;
-
-    /*
-     * While SOLDER is active, continuously synchronize the UI/control
-     * state from the debounced pin LEVEL.
-     *
-     * Do not depend only on a one-shot edge event. Therefore, even if
-     * a transition occurred during a screen change or was missed once,
-     * the next task pass repairs the state automatically.
-     */
-    if(screen == SCREEN_SOLDER)
-    {
-        uint8_t want_sleep =
-            (sleep_stable ==
-             SOLDER_SLEEP_ACTIVE)
-            ? 1U
-            : 0U;
-
-        if(UI_Solider_IsSleeping() !=
-           want_sleep)
-        {
-            UI_Solider_SetSleep(
-                want_sleep,
-                sleep_temp
-            );
-        }
-    }
+    /* intentionally empty */
 }
 
 /*
@@ -3056,6 +3489,43 @@ static void out_button_task(void)
         (btn_out.stable == BTN_ACTIVE)
         ? 1U
         : 0U;
+
+    /*
+     * Dedicated FAULT-screen PB9 behavior.
+     *
+     * No long-press SOLDER action is allowed while faulted.
+     * One press+release clears the fault and starts a fresh POWER run.
+     */
+    if(screen ==
+       SCREEN_FAULT)
+    {
+        if(pressed)
+        {
+            if(!outbtn_press_active)
+            {
+                outbtn_press_active =
+                    1U;
+
+                outbtn_long_handled =
+                    0U;
+
+                outbtn_press_tick =
+                    now;
+            }
+        }
+        else if(outbtn_press_active)
+        {
+            outbtn_press_active =
+                0U;
+
+            outbtn_long_handled =
+                0U;
+
+            fault_reset_and_restart();
+        }
+
+        return;
+    }
 
     if(pressed)
     {
@@ -3108,31 +3578,60 @@ static void out_button_task(void)
                     }
                     else
                     {
-                        uint8_t was_enabled = ui->enable;
+                        uint8_t was_enabled =
+                            ui->enable;
 
-                        ui->enable ^= 1U;
-
-                        if((was_enabled == 0U) &&
-                           (ui->enable != 0U))
+                        if(was_enabled == 0U)
                         {
-                            protect_fault = PROTECT_FAULT_NONE;
-                            protect_fault_latched = 0U;
+                            /*
+                             * Save while power stage is still OFF.
+                             * This avoids Flash erase/program stalls
+                             * after PWM has already started.
+                             */
+                            ui_flash_last_save_ok =
+                                ui_flash_save(
+                                    ui->vset,
+                                    ui->iset
+                                );
+
+                            if(ui_flash_last_save_ok != 0U)
+                            {
+                                ui_flash_dirty =
+                                    0U;
+                            }
+
+                            protect_fault =
+                                PROTECT_FAULT_NONE;
+
+                            protect_fault_latched =
+                                0U;
 
                             protection_arm();
 
-                            /*
-                             * Save VSET/ISET and current protection limits.
-                             */
-                            (void)ui_flash_save(
-                                ui->vset,
-                                ui->iset
-                            );
-                        }
+                            ui->enable =
+                                1U;
 
-                        if(ui->enable == 0U)
-                            ui->state = BBUI_STATE_OFF;
-                        else if(ui->state == BBUI_STATE_OFF)
-                            ui->state = BBUI_STATE_CV;
+                            if(ui->state ==
+                               BBUI_STATE_OFF)
+                            {
+                                ui->state =
+                                    BBUI_STATE_CV;
+                            }
+                        }
+                        else
+                        {
+                            /*
+                             * Stop first. Flash is saved later after
+                             * the converter has been OFF for 500 ms.
+                             */
+                            ui->enable =
+                                0U;
+
+                            ui->state =
+                                BBUI_STATE_OFF;
+
+                            ui_flash_mark_dirty();
+                        }
 
                         status_dirty = 1U;
                         buzzer_button_start();
@@ -3161,7 +3660,23 @@ static void out_button_task(void)
                         menu_response_mode;
 
                     UI_Solider_SetTheme((ui_theme == UI_THEME_LIGHT) ? 1U : 0U);
-                    (void)ui_flash_save(ui->vset,ui->iset);
+
+                    ui_flash_last_save_ok =
+                        ui_flash_save(
+                            ui->vset,
+                            ui->iset
+                        );
+
+                    if(ui_flash_last_save_ok != 0U)
+                    {
+                        ui_flash_dirty =
+                            0U;
+                    }
+                    else
+                    {
+                        ui_flash_mark_dirty();
+                    }
+
                     enter_live_mode(menu_ui_mode);
                 }
             }
@@ -3195,6 +3710,12 @@ static void clear_protection_fault(void)
     {
         ui->enable = 0U;
         ui->state = BBUI_STATE_OFF;
+
+        /*
+         * Boot restore is not a user edit.
+         */
+        ui_flash_dirty =
+            0U;
     }
 
     protect_prev_enable = 0U;
@@ -3232,12 +3753,13 @@ static void abort_solder_on_fault(void)
     );
 #endif
 
-    enter_live_mode(solder_return_ui_mode);
-
     /*
-     * enter_live_mode only changes screen rendering;
-     * retain FAULT state.
+     * Do not redraw NUMBER/GRAPH here.
+     * The caller will immediately enter the dedicated FAULT screen.
      */
+    ui_mode =
+        solder_return_ui_mode;
+
     ui->enable = 0U;
     ui->state = BBUI_STATE_FAULT;
     status_dirty = 1U;
@@ -3247,6 +3769,13 @@ static void protection_trip(ProtectFault_t fault)
 {
     if(ui == NULL)
         return;
+
+    /*
+     * Capture values before output collapse changes measurements.
+     */
+    fault_capture_snapshot(
+        fault
+    );
 
     protect_fault = fault;
     protect_fault_latched = 1U;
@@ -3262,6 +3791,8 @@ static void protection_trip(ProtectFault_t fault)
 
     if(screen == SCREEN_SOLDER)
         abort_solder_on_fault();
+
+    enter_fault_screen();
 
     status_dirty = 1U;
 }
@@ -3298,11 +3829,34 @@ static void protection_task(void)
     if(ui->state == BBUI_STATE_FAULT &&
        !protect_fault_latched)
     {
-        protect_fault = PROTECT_FAULT_EXTERNAL;
-        protect_fault_latched = 1U;
+        /*
+         * main.c has already captured the exact pre-shutdown
+         * values in g_power_fault_*.
+         */
+        fault_capture_snapshot(
+            PROTECT_FAULT_EXTERNAL
+        );
 
-        buzzer_fault_start(PROTECT_FAULT_EXTERNAL);
-        status_dirty = 1U;
+        protect_fault =
+            PROTECT_FAULT_EXTERNAL;
+
+        protect_fault_latched =
+            1U;
+
+        buzzer_fault_start(
+            PROTECT_FAULT_EXTERNAL
+        );
+
+        if(screen ==
+           SCREEN_SOLDER)
+        {
+            abort_solder_on_fault();
+        }
+
+        enter_fault_screen();
+
+        status_dirty =
+            1U;
     }
 
     if(ui->enable == 0U ||
@@ -3527,13 +4081,15 @@ static void encoder_task(void)
                         delta,
                         &ui->openloop_ratio,
                         0.01f,
-                        0.00f,
-                        0.99f))
+                        0.03f,
+                        0.97f))
                     {
                         /*
                          * RATIO always has fixed step = 0.01.
                          */
                         activate_v_edit();
+
+                        ui_flash_mark_dirty();
                     }
                 }
                 else
@@ -3547,6 +4103,8 @@ static void encoder_task(void)
                         VSET_MAX))
                     {
                         activate_v_edit();
+
+                        ui_flash_mark_dirty();
                     }
                 }
             }
@@ -3624,6 +4182,8 @@ static void encoder_task(void)
                     ISET_MAX))
                 {
                     activate_i_edit();
+
+                    ui_flash_mark_dirty();
                 }
             }
             else if(screen == SCREEN_MENU)
@@ -3916,9 +4476,13 @@ void BBUI_Init(BBUI_Data_t *data,
          * Restore the most recently saved setpoints.
          * If Flash is empty/invalid, keep the values supplied by main.c.
          */
-        if(ui_flash_read(
-               &saved_vset,
-               &saved_iset))
+        ui_flash_last_read_ok =
+            ui_flash_read(
+                &saved_vset,
+                &saved_iset
+            );
+
+        if(ui_flash_last_read_ok != 0U)
         {
             ui->vset = saved_vset;
             ui->iset = saved_iset;
@@ -3966,8 +4530,8 @@ void BBUI_Init(BBUI_Data_t *data,
         ui->openloop_ratio =
             clampf_ui(
                 ui->openloop_ratio,
-                0.00f,
-                0.99f
+                0.03f,
+                0.97f
             );
 
         /*
@@ -4034,7 +4598,8 @@ void BBUI_Init(BBUI_Data_t *data,
 
     sleep_raw_last = HAL_GPIO_ReadPin(SOLDER_SLEEP_PORT,SOLDER_SLEEP_PIN);
     sleep_stable = sleep_raw_last;
-    sleep_changed_tick = HAL_GetTick();
+    sleep_off_tick = HAL_GetTick();
+    sleep_off_tracking = 0U;
     UI_Solider_SetTheme((ui_theme == UI_THEME_LIGHT) ? 1U : 0U);
     status_led_write(0U);
 
@@ -4065,6 +4630,18 @@ void BBUI_Init(BBUI_Data_t *data,
     g_power_fault_code =
         POWER_FAULT_NONE;
 
+    memset(
+        &fault_snapshot,
+        0,
+        sizeof(fault_snapshot)
+    );
+
+    fault_snapshot.fault =
+        PROTECT_FAULT_NONE;
+
+    fault_snapshot.power_fault_code =
+        POWER_FAULT_NONE;
+
     protect_enable_tick = HAL_GetTick();
     protect_prev_enable = 0U;
 
@@ -4089,6 +4666,12 @@ void BBUI_Task(void)
 
     encoder_task();
     button_task();
+
+    /*
+     * Deferred setpoint persistence.
+     * Writes once after encoder activity has been idle for 1.2 s.
+     */
+    ui_flash_autosave_task();
 
     /*
      * Protection is independent of the selected NUMBER/GRAPH/SOLDER view.
@@ -4173,14 +4756,29 @@ void BBUI_Task(void)
     {
         UI_Solider_Task(0U);
     }
+    else if(screen == SCREEN_FAULT)
+    {
+        /*
+         * Static snapshot screen.
+         * Do not continuously redraw it; this avoids TFT flicker.
+         */
+    }
 }
 
 void BBUI_ForceRefresh(void)
 {
     if(screen == SCREEN_SOLDER)
+    {
         UI_Solider_Task(1U);
+    }
+    else if(screen == SCREEN_FAULT)
+    {
+        draw_fault_screen();
+    }
     else
+    {
         enter_live_mode(ui_mode);
+    }
 }
 
 void BBUI_ButtonIRQ(void)

@@ -87,17 +87,55 @@ static void MX_TIM4_Init(void);
 #define VREF                        3.3f
 
 #define VIN_DIV_GAIN                11.131f
-#define VOUT_DIV_GAIN               10.959f
+/*
+ * VOUT sensing divider:
+ *
+ *   Vout ---- 220 kOhm ----+---- ADC
+ *                          |
+ *                         10 kOhm
+ *                          |
+ *                         GND
+ *
+ * Gain = (220k + 10k) / 10k = 23.0
+ *
+ * 50 V -> ADC ~= 2.17 V
+ * 60 V -> ADC ~= 2.61 V
+ */
+#define VOUT_DIV_GAIN               23.000f
 
+/*
+ * VIN low-voltage protection threshold.
+ *
+ * TEMPORARILY DISABLED for debugging.
+ *
+ * Keep VIN_MIN_PROTECT = 2.0 V because other code uses it only
+ * as a validity threshold for the idle VIN reference.
+ *
+ * Set VIN_MIN_PROTECT_ENABLE back to 1U when testing is finished.
+ */
 #define VIN_MIN_PROTECT             2.0f
+#define VIN_MIN_PROTECT_ENABLE      0U
 #define TEMP_MAX_PROTECT            80.0f
 
-#define CURRENT_MAX                 10.0f
-#define I_HARD_LIMIT_A              18.5f
+#define CURRENT_MAX                 20.0f
+/*
+ * Power-stage current targets:
+ *   continuous = 12 A
+ *   hardware peak capability target = 20 A
+ *
+ * CURRENT_GAIN=100 and SHUNT_R=0.002:
+ *   Vsense = I * 0.2 V
+ *   ADC 3.3 V full-scale -> ~16.5 A
+ *
+ * So software hard OCP is kept below ADC saturation.
+ */
+#define I_CONTINUOUS_MAX_A           12.0f
+#define I_PEAK_HARDWARE_A            20.0f
+#define I_HARD_LIMIT_A               15.5f
 #define POWER_START_BLANK_MS        200U
 
-#define CURRENT_GAIN                200.0f
-#define SHUNT_R                     0.0011f
+#define CURRENT_GAIN                100.0f
+#define SHUNT_R                     0.002f
 
 
 /* =========================================================
@@ -105,18 +143,51 @@ static void MX_TIM4_Init(void);
  * ========================================================= */
 
 #define VSET_MIN                    1.0f
-#define VSET_MAX                    30.0f
+#define VSET_MAX                    50.0f
 #define VSET_STEP                   0.1f
 
 #define ISET_MIN                    0.1f
-#define ISET_MAX                    10.0f
+#define ISET_MAX                    I_CONTINUOUS_MAX_A
 #define ISET_STEP                   0.1f
 
-#define POWERSTAGE_DUTY_MIN         0.05f
-#define POWERSTAGE_DUTY_MAX         0.95f
+/*
+ * =========================================================
+ * PURE SYNCHRONOUS BUCK
+ * =========================================================
+ *
+ * Old BOOST high-side path Q3 is bypassed in hardware.
+ * Old BOOST low-side Q4 MUST NEVER turn on.
+ *
+ * Active power-stage PWM:
+ *
+ *   TIM1_CH1  -> IR2101 HIN -> Q1 high-side
+ *   TIM1_CH1N -> IR2101 LIN -> Q2 low-side
+ *
+ * Disabled:
+ *
+ *   TIM1_CH2 / TIM1_CH2N
+ *
+ * Ideal relation:
+ *
+ *   Vout ~= D_buck * Vin
+ *
+ * High-side duty is clamped to 3..97 % of TIM1->ARR.
+ * This guarantees at least ~3 % complementary low-side time
+ * for bootstrap refresh.
+ * ========================================================= */
 
-#define RATIO_MIN                   POWERSTAGE_DUTY_MIN
-#define RATIO_MAX                   POWERSTAGE_DUTY_MAX
+#define BUCK_DUTY_MIN                0.03f
+#define BUCK_DUTY_MAX                0.97f
+
+#define POWERSTAGE_DUTY_MIN          BUCK_DUTY_MIN
+#define POWERSTAGE_DUTY_MAX          BUCK_DUTY_MAX
+
+/*
+ * Keep the old variable/function names "ratio" for minimum code churn.
+ * In PURE BUCK, ratio means direct high-side duty.
+ */
+#define RATIO_MIN                    BUCK_DUTY_MIN
+#define RATIO_MAX                    BUCK_DUTY_MAX
 
 
 /* =========================================================
@@ -125,14 +196,14 @@ static void MX_TIM4_Init(void);
  * TIM1 clock = 72 MHz
  *
  * PSC = 5
- * ARR = 599
+ * ARR = 799
  *
  * PWM:
- *   72 MHz / (5 + 1) / (599 + 1)
- *   = 20 kHz
+ *   72 MHz / (5 + 1) / (799 + 1)
+ *   = 15 kHz
  *
- * RCR = 3:
- *   Update IRQ = 20 kHz / (3 + 1)
+ * RCR = 2:
+ *   Update IRQ = 15 kHz / (2 + 1)
  *              = 5 kHz
  *
  * CC:
@@ -385,6 +456,18 @@ static uint8_t PowerStage_pwm_running = 0U;
 
 volatile uint8_t g_power_fault_code =
     POWER_FAULT_NONE;
+
+/*
+ * Snapshot captured BEFORE the power stage is shut down.
+ * UI.c uses these values on the full-screen FAULT page.
+ */
+volatile float g_power_fault_vin = 0.0f;
+volatile float g_power_fault_vout = 0.0f;
+volatile float g_power_fault_current = 0.0f;
+volatile float g_power_fault_temp = 0.0f;
+
+volatile float g_power_fault_value = 0.0f;
+volatile float g_power_fault_limit = 0.0f;
 
 
 static uint8_t power_prev_enable = 0U;
@@ -691,7 +774,21 @@ static float Read_NTC_Temp(void)
 
 static void PowerStage_Start(void)
 {
-    __HAL_TIM_MOE_ENABLE(&htim1);
+    /*
+     * PURE BUCK safety:
+     * old BOOST outputs stay disabled on every start.
+     */
+    TIM1->CCR2 = 0U;
+
+    TIM1->CCER &=
+        ~(
+            TIM_CCER_CC2E |
+            TIM_CCER_CC2NE
+         );
+
+    __HAL_TIM_MOE_ENABLE(
+        &htim1
+    );
 
     PowerStage_pwm_running = 1U;
 }
@@ -699,102 +796,131 @@ static void PowerStage_Start(void)
 
 static void PowerStage_Stop(void)
 {
-    __HAL_TIM_MOE_DISABLE(&htim1);
-		TIM1 -> CCR1 = 0;
-		TIM1 -> CCR2 = 599;
+    /*
+     * PURE BUCK OFF.
+     *
+     * Prepare zero duty and permanently disable old BOOST outputs.
+     */
+    TIM1->CCR1 = 0U;
+    TIM1->CCR2 = 0U;
+
+    TIM1->CCER &=
+        ~(
+            TIM_CCER_CC2E |
+            TIM_CCER_CC2NE
+         );
+
+    __HAL_TIM_MOE_DISABLE(
+        &htim1
+    );
+
     PowerStage_pwm_running = 0U;
 }
 
 
 uint16_t duty_buck = 0U;
-uint16_t duty_boost = 0U;
 
 
-void PowerStage_SetRatio(float ratio)
+/* =========================================================
+ * PURE BUCK DUTY WRITER
+ * ========================================================= */
+
+static void PowerStage_ApplyBuckDuty(
+    float d_buck_hs)
 {
-    ratio =
+    /*
+     * Clamp normalized command first.
+     */
+    d_buck_hs =
         clampf(
-            ratio,
-            RATIO_MIN,
-            RATIO_MAX
-        );
-
-    uint32_t arr =
-        TIM1->ARR;
-
-    uint32_t ccr =
-        (uint32_t)(
-            ratio *
-            (float)arr
-        );
-
-    duty_buck =
-        (uint16_t)ccr;
-
-    duty_boost =
-        (uint16_t)(
-            arr - ccr
+            d_buck_hs,
+            BUCK_DUTY_MIN,
+            BUCK_DUTY_MAX
         );
 
     /*
-     * Old ratio convention:
+     * User-requested clamp is referenced directly to TIM1->ARR:
      *
-     * CH1 = ratio
-     * CH2 = 1 - ratio
+     *   CCR_MIN = 3 %  of ARR
+     *   CCR_MAX = 97 % of ARR
+     *
+     * With ARR = 799:
+     *
+     *   CCR_MIN = round(0.03 * 799) = 24
+     *   CCR_MAX = round(0.97 * 799) = 775
      */
-    TIM1->CCR1 = duty_buck;
-    TIM1->CCR2 = duty_boost;
-}
-
-
-/*
- * OPEN LOOP ratio setter.
- *
- * Unlike the closed-loop setter, this intentionally allows:
- *
- *     0.00 <= ratio <= 0.99
- *
- * for manual power-stage testing.
- *
- * Mapping remains:
- *
- *     CH1 = ratio
- *     CH2 = 1 - ratio
- */
-static void PowerStage_SetOpenLoopRatio(float ratio)
-{
-    ratio =
-        clampf(
-            ratio,
-            0.00f,
-            0.99f
-        );
-
-    PowerStage.openloop_ratio =
-        ratio;
-
     uint32_t arr =
         TIM1->ARR;
 
-    uint32_t ccr =
+    uint32_t ccr_min =
         (uint32_t)(
-            ratio *
-            (float)arr
+            BUCK_DUTY_MIN *
+            (float)arr +
+            0.5f
         );
 
-    if(ccr > arr)
-        ccr = arr;
+    uint32_t ccr_max =
+        (uint32_t)(
+            BUCK_DUTY_MAX *
+            (float)arr +
+            0.5f
+        );
+
+    uint32_t ccr1 =
+        (uint32_t)(
+            d_buck_hs *
+            (float)arr +
+            0.5f
+        );
+
+    if(ccr1 < ccr_min)
+    {
+        ccr1 = ccr_min;
+    }
+    else if(ccr1 > ccr_max)
+    {
+        ccr1 = ccr_max;
+    }
 
     duty_buck =
-        (uint16_t)ccr;
+        (uint16_t)ccr1;
 
-    duty_boost =
-        (uint16_t)(
-            arr - ccr
-        );
+    TIM1->CCR1 =
+        ccr1;
+}
 
-    TIM1->CCR1 = duty_buck;
-    TIM1->CCR2 = duty_boost;
+
+/* =========================================================
+ * PURE BUCK SET DUTY
+ *
+ * API name is retained to avoid rewriting the whole UI/control
+ * layer, but "ratio" now means:
+ *
+ *       ratio = D_buck ~= Vout / Vin
+ *
+ * It no longer means Vout/(Vin+Vout).
+ * ========================================================= */
+
+void PowerStage_SetRatio(
+    float ratio)
+{
+    PowerStage_ApplyBuckDuty(
+        ratio
+    );
+}
+
+
+static void PowerStage_SetOpenLoopRatio(
+    float ratio)
+{
+    ratio = clampf(
+        ratio,
+        RATIO_MIN,
+        RATIO_MAX
+    );
+
+    PowerStage.openloop_ratio = ratio;
+    PowerStage_SetRatio(ratio);
 }
 
 
@@ -934,12 +1060,18 @@ static float PowerStage_FeedForward_Ratio(
     if(vref < 0.5f)
         return RATIO_MIN;
 
-    float ratio =
+    /*
+     * PURE BUCK feed-forward:
+     *
+     *     Vout ~= D * Vin
+     *     Dff  = Vref / Vin
+     */
+    float duty_ff =
         vref /
-        (vin + vref);
+        vin;
 
     return clampf(
-        ratio,
+        duty_ff,
         RATIO_MIN,
         RATIO_MAX
     );
@@ -1165,8 +1297,9 @@ static uint8_t PowerStage_Service_5kHz(void)
     /*
      * Do not enable MOSFETs until VIN is valid.
      */
-    if(PowerStage.vin <
-       VIN_MIN_PROTECT)
+    if((VIN_MIN_PROTECT_ENABLE != 0U) &&
+       (PowerStage.vin <
+        VIN_MIN_PROTECT))
     {
         /*
          * VIN is considered a FAULT only if the converter was
@@ -1177,6 +1310,24 @@ static uint8_t PowerStage_Service_5kHz(void)
         {
             g_power_fault_code =
                 POWER_FAULT_VIN_LOW;
+
+            g_power_fault_vin =
+                PowerStage.vin;
+
+            g_power_fault_vout =
+                PowerStage.vout;
+
+            g_power_fault_current =
+                PowerStage.current;
+
+            g_power_fault_temp =
+                PowerStage.temp;
+
+            g_power_fault_value =
+                PowerStage.vin;
+
+            g_power_fault_limit =
+                VIN_MIN_PROTECT;
 
             PowerStage.enable =
                 0U;
@@ -1249,6 +1400,24 @@ static uint8_t PowerStage_Service_5kHz(void)
         g_power_fault_code =
             POWER_FAULT_TEMP;
 
+        g_power_fault_vin =
+            PowerStage.vin;
+
+        g_power_fault_vout =
+            PowerStage.vout;
+
+        g_power_fault_current =
+            PowerStage.current;
+
+        g_power_fault_temp =
+            PowerStage.temp;
+
+        g_power_fault_value =
+            PowerStage.temp;
+
+        g_power_fault_limit =
+            TEMP_MAX_PROTECT;
+
         PowerStage_CVCC_Reset();
 
         PowerStage.enable = 0U;
@@ -1278,6 +1447,28 @@ static uint8_t PowerStage_Service_5kHz(void)
             g_power_fault_code =
                 POWER_FAULT_HARD_CURRENT;
 
+            g_power_fault_vin =
+                PowerStage.vin;
+
+            g_power_fault_vout =
+                PowerStage.vout;
+
+            /*
+             * Store the fast 3-sample current that actually
+             * crossed the hard-current threshold.
+             */
+            g_power_fault_current =
+                current_fast;
+
+            g_power_fault_temp =
+                PowerStage.temp;
+
+            g_power_fault_value =
+                current_fast;
+
+            g_power_fault_limit =
+                I_HARD_LIMIT_A;
+
             PowerStage_CVCC_Reset();
 
             PowerStage.enable = 0U;
@@ -1301,8 +1492,8 @@ static uint8_t PowerStage_Service_5kHz(void)
  *
  * Ts = 1 ms
  *
- * Only calculates ratio_cv.
- * Final PWM is selected by CC loop using:
+ * Only calculates buck duty command ratio_cv.
+ * Final duty is selected by CC loop using:
  *
  *      ratio_out = min(ratio_cv, ratio_cc)
  * ========================================================= */
@@ -1585,8 +1776,8 @@ void HAL_TIM_PeriodElapsedCallback(
         ratio_out =
             clampf(
                 PowerStage.openloop_ratio,
-                0.00f,
-                0.99f
+                RATIO_MIN,
+                RATIO_MAX
             );
 
         PowerStage.openloop_ratio =
@@ -1735,6 +1926,10 @@ void Buck_UI_Init(void)
      *
      * TIM1 counter will stay alive permanently.
      */
+    /*
+     * PURE BUCK:
+     * only Q1/Q2 (CH1/CH1N) are PWM driven.
+     */
     HAL_TIM_PWM_Start(
         &htim1,
         TIM_CHANNEL_1
@@ -1745,15 +1940,16 @@ void Buck_UI_Init(void)
         TIM_CHANNEL_1
     );
 
-    HAL_TIM_PWM_Start(
-        &htim1,
-        TIM_CHANNEL_2
-    );
+    /*
+     * Never start old BOOST CH2/CH2N.
+     */
+    TIM1->CCR2 = 0U;
 
-    HAL_TIMEx_PWMN_Start(
-        &htim1,
-        TIM_CHANNEL_2
-    );
+    TIM1->CCER &=
+        ~(
+            TIM_CCER_CC2E |
+            TIM_CCER_CC2NE
+         );
 
     /*
      * Boot with BB output OFF.
@@ -2072,7 +2268,7 @@ static void MX_SPI1_Init(void)
   hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi1.Init.NSS = SPI_NSS_SOFT;
-  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_16;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_4;
   hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
@@ -2108,11 +2304,44 @@ static void MX_TIM1_Init(void)
 
   /* USER CODE END TIM1_Init 1 */
   htim1.Instance = TIM1;
+
+  /*
+   * =====================================================
+   * POWER-STAGE GATE DRIVER MAPPING
+   * =====================================================
+   *
+   * BUCK bridge - IR2101S:
+   *   TIM1_CH1  -> HIN -> Q1 high-side
+   *   TIM1_CH1N -> LIN -> Q2 low-side
+   *
+   * PURE BUCK:
+   *   TIM1_CH1  -> HIN -> Q1 high-side
+   *   TIM1_CH1N -> LIN -> Q2 low-side
+   *
+   * Old CH2/CH2N boost commands are never enabled.
+   * Q4 low-side must remain OFF.
+   */
+
+  /*
+   * TIM1 power-stage PWM:
+   *
+   * timer clock = 72 MHz
+   * PSC = 5   -> counter clock = 12 MHz
+   * ARR = 799 -> PWM = 12 MHz / 800 = 15 kHz
+   *
+   * RCR = 2:
+   * update IRQ = 15 kHz / 3 = 5 kHz
+   *
+   * Therefore:
+   *   PWM = 15 kHz
+   *   CC  = 5 kHz, Ts = 200 us
+   *   CV  = 1 kHz, Ts = 1 ms (CV_LOOP_DIV = 5)
+   */
   htim1.Init.Prescaler = 5;
   htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim1.Init.Period = 599;
+  htim1.Init.Period = 799;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim1.Init.RepetitionCounter = 3;
+  htim1.Init.RepetitionCounter = 2;
   htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim1) != HAL_OK)
   {
@@ -2144,16 +2373,17 @@ static void MX_TIM1_Init(void)
   {
     Error_Handler();
   }
-  sConfigOC.OCPolarity = TIM_OCPOLARITY_LOW;
-  sConfigOC.OCNPolarity = TIM_OCNPOLARITY_LOW;
-  if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  /*
+   * PURE BUCK:
+   * TIM1 CH2/CH2N are intentionally NOT configured for PWM.
+   *
+   * Q3 has been bypassed in hardware.
+   * Q4 must be held permanently OFF.
+   */
   sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
   sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
   sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
-  sBreakDeadTimeConfig.DeadTime = 45;
+  sBreakDeadTimeConfig.DeadTime = 30;
   sBreakDeadTimeConfig.BreakState = TIM_BREAK_DISABLE;
   sBreakDeadTimeConfig.BreakPolarity = TIM_BREAKPOLARITY_HIGH;
   sBreakDeadTimeConfig.AutomaticOutput = TIM_AUTOMATICOUTPUT_DISABLE;
@@ -2238,17 +2468,16 @@ static void MX_TIM3_Init(void)
   /* USER CODE END TIM3_Init 1 */
   htim3.Instance = TIM3;
   /*
-   * Heater inner PWM:
+   * Heater PWM:
    *
-   * 72 MHz / (PSC+1) / (ARR+1)
-   * = 72 MHz / 3 / 1001
-   * ~= 23.98 kHz
+   * TIM3CLK = 72 MHz
+   * PSC = 20, ARR = 1000
+   * fPWM = 72 MHz / (21 * 1001) ~= 3.43 kHz
    *
-   * Faster than the 5-kHz BB control loop and above the
-   * audible range, so the BB stage sees a much smoother
-   * average solder load.
+   * The temperature PID in UI_Solider.c controls TIM3 CH2 duty
+   * during the HEAT window.
    */
-  htim3.Init.Prescaler = 10;
+  htim3.Init.Prescaler = 20;
   htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim3.Init.Period = 1000;
   htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;

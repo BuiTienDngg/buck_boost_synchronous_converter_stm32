@@ -20,10 +20,7 @@ typedef struct
     float fet_temp;
     float power;
 
-    /*
-     * Buck-Boost output voltage retained for compatibility/
-     * power calculation. It is not plotted on the SOLDER graph.
-     */
+    /* Buck-Boost output voltage for SOLDER graph */
     float vout;
 
     float set_temp;
@@ -32,6 +29,21 @@ typedef struct
     uint8_t active_preset;
 
 } UI_Solider_Data_t;
+
+
+/* =========================================================
+ * SOLDER TIP TYPE
+ * ========================================================= */
+
+typedef enum
+{
+    SOLIDER_TIP_C245 = 0,
+    SOLIDER_TIP_C210
+
+} SoliderTipType_t;
+
+void UI_Solider_SetTipType(
+    SoliderTipType_t type);
 
 
 /* =========================================================
@@ -80,7 +92,7 @@ void UI_Solider_SetTheme(uint8_t light);
 /* =========================================================
  * LIVE DATA
  *
- * vout = PowerStage.vout (kept for compatibility; not plotted)
+ * vout = PowerStage.vout
  * ========================================================= */
 
 void UI_Solider_SetData(float tip_temp,

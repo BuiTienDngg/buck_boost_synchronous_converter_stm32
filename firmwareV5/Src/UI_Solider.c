@@ -221,8 +221,8 @@ static uint8_t sol_theme_light = 0U;
  *
  * Starting values are intentionally conservative to reduce overshoot.
  */
-#define SOLIDER_TEMP_PID_KP               0.0200f
-#define SOLIDER_TEMP_PID_KI               0.0300f
+#define SOLIDER_TEMP_PID_KP               0.0100f
+#define SOLIDER_TEMP_PID_KI               0.0200f
 #define SOLIDER_TEMP_PID_KD               0.0015f
 #define SOLIDER_TEMP_PID_DT_S             0.0500f
 
@@ -401,6 +401,27 @@ static UI_Solider_Data_t sol;
 static uint8_t sol_active = 0U;
 static uint8_t sol_sleep = 0U;
 static float sol_sleep_temp = 200.0f;
+
+/*
+ * Selected solder cartridge.
+ * Default = C245.
+ */
+static SoliderTipType_t solider_tip_type =
+    SOLIDER_TIP_C245;
+
+/*
+ * Last 3 PB11 sleep samples.
+ *
+ * bit = 1 -> PB11 LOW  -> holder / sleep request
+ * bit = 0 -> PB11 HIGH -> lifted / wake
+ *
+ * SLEEP is accepted only when the last 3 samples are all 1:
+ *
+ *      history == 0b111
+ */
+static uint8_t solider_sleep_history = 0U;
+
+volatile uint8_t solider_sleep_history_debug = 0U;
 
 static uint8_t sol_event_flags = 0U;
 
@@ -1194,6 +1215,13 @@ void UI_Solider_Enter(void)
     sol_active = 1U;
     sol_sleep = 0U;
 
+    /*
+     * New session must collect 3 fresh PB11 samples before
+     * accepting a SLEEP request.
+     */
+    solider_sleep_history = 0U;
+    solider_sleep_history_debug = 0U;
+
     target_beep_reset();
     solder_event_set(UI_SOLDER_EVENT_ENTER);
     force_redraw = 1U;
@@ -1229,6 +1257,10 @@ void UI_Solider_Exit(void)
 {
     sol_active = 0U;
     sol_sleep = 0U;
+
+    solider_sleep_history = 0U;
+    solider_sleep_history_debug = 0U;
+
     Solider_PID_Enable(0U);
 }
 
@@ -1241,6 +1273,23 @@ uint8_t UI_Solider_IsSleeping(void)
 {
     return sol_sleep;
 }
+
+
+void UI_Solider_SetTipType(
+    SoliderTipType_t type)
+{
+    if(type == SOLIDER_TIP_C210)
+    {
+        solider_tip_type =
+            SOLIDER_TIP_C210;
+    }
+    else
+    {
+        solider_tip_type =
+            SOLIDER_TIP_C245;
+    }
+}
+
 
 uint8_t UI_Solider_GetEvents(void)
 {
@@ -1517,41 +1566,24 @@ static float clampf_solider(float x,
 
     return x;
 }
-/* =========================================================
- * SOLDER TIP TYPE
- * ========================================================= */
 
-typedef enum
-{
-    SOLIDER_TIP_C245 = 0,
-    SOLIDER_TIP_C210
-} SoliderTipType_t;
-
-static SoliderTipType_t solider_tip_type =
-    SOLIDER_TIP_C245;
-
-
-void UI_Solider_SetTipType(
-    SoliderTipType_t type)
-{
-    solider_tip_type =
-        type;
-}
-
-
-/* =========================================================
- * ADC -> TEMPERATURE
- * ========================================================= */
-
-float Solider_ADC_ToTemp(
-    uint16_t adc_raw)
+float Solider_ADC_ToTemp(uint16_t adc_raw)
 {
     float gain;
 
+    /*
+     * Cartridge calibration:
+     *
+     * C245:
+     *      Temp = (ADC - 1250) * 1.1
+     *
+     * C210:
+     *      Temp = (ADC - 1250) * 1.5
+     */
     if(solider_tip_type ==
        SOLIDER_TIP_C210)
     {
-        gain = 0.5f;
+        gain = 1.5f;
     }
     else
     {
@@ -1571,6 +1603,7 @@ float Solider_ADC_ToTemp(
 
     return temp;
 }
+
 
 /* =========================================================
  * HEATER OUTPUT - FAST INNER PWM
@@ -2143,15 +2176,72 @@ static uint8_t Solider_CheckSleepDuringON(void)
 
     solider_sleep_check_count++;
 
-    uint8_t want_sleep =
+    /*
+     * Store the 3 most recent sleep requests.
+     *
+     * PB11 LOW  -> sample = 1
+     * PB11 HIGH -> sample = 0
+     */
+    uint8_t sleep_sample =
         (raw == SOLIDER_SLEEP_ACTIVE)
         ? 1U
         : 0U;
 
-    if(want_sleep != sol_sleep)
+    solider_sleep_history =
+        (uint8_t)(
+            (
+                (solider_sleep_history << 1U) |
+                sleep_sample
+            ) &
+            0x07U
+        );
+
+    solider_sleep_history_debug =
+        solider_sleep_history;
+
+
+    /*
+     * ENTER SLEEP:
+     *
+     * Require THREE consecutive LOW readings:
+     *
+     *      001 -> not yet
+     *      011 -> not yet
+     *      111 -> confirm SLEEP
+     */
+    if(sol_sleep == 0U)
     {
+        if(solider_sleep_history ==
+           0x07U)
+        {
+            UI_Solider_SetSleep(
+                1U,
+                sol_sleep_temp
+            );
+
+            return 1U;
+        }
+
+        return 0U;
+    }
+
+
+    /*
+     * WAKE:
+     *
+     * Wake immediately on HIGH.
+     * This keeps lift-from-holder response fast.
+     */
+    if(raw != SOLIDER_SLEEP_ACTIVE)
+    {
+        solider_sleep_history =
+            0U;
+
+        solider_sleep_history_debug =
+            0U;
+
         UI_Solider_SetSleep(
-            want_sleep,
+            0U,
             sol_sleep_temp
         );
 

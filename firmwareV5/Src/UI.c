@@ -61,7 +61,7 @@
 #define SOLDER_ROUTE_PORT              GPIOB
 #define SOLDER_ROUTE_PIN               GPIO_PIN_15
 
-#define SOLDER_C245_BB_VSET            20.0f
+#define SOLDER_C245_BB_VSET            18.0f
 #define SOLDER_C245_BB_ISET             6.0f
 #define SOLDER_C210_BB_VSET            12.0f
 #define SOLDER_C210_BB_ISET             5.0f
@@ -1913,11 +1913,15 @@ static void draw_number_measurements(void)
     );
 
     /*
-     * Vin / Temperature:
-     * also update only changed characters.
+     * Auxiliary information.
+     *
+     * Compact label:value format:
+     *   Vin:24.00V T:45C
+     *
+     * Duty is intentionally not displayed.
      */
     snprintf(buf, sizeof(buf),
-             "Vin %.1fV  T %.0fC",
+             "Vin:%.2fV T:%.0fC",
              disp_vin,
              disp_temp);
 
@@ -2298,7 +2302,7 @@ static void draw_graph_static(void)
 
     /*
      * Same control/status area as NUMBER:
-     * Vin/Temp, CV/CC, ON/OFF, VSET, ISET.
+     * Vin/Temp, runtime, VSET, ISET.
      */
     ST7789_DrawFilledRectangle(0, 176, 320, 1, C_GRID);
 
@@ -2354,7 +2358,7 @@ static void draw_graph_live_info(void)
     char buf[64];
 
     snprintf(buf, sizeof(buf),
-             "%.2fV %.2fA %.0fW",
+             "V:%.2fV I:%.2fA P:%.0fW",
              disp_vout,
              disp_iout,
              disp_vout * disp_iout);
@@ -2370,7 +2374,7 @@ static void draw_graph_live_info(void)
     );
 
     snprintf(buf, sizeof(buf),
-             "Vin %.1fV  T %.0fC",
+             "Vin:%.2fV T:%.0fC",
              disp_vin,
              disp_temp);
 
@@ -3395,6 +3399,24 @@ static void enter_solder_mode(void)
         ? 1U
         : 0U
     );
+
+    /*
+     * Synchronize the cartridge temperature calibration with
+     * the C245/C210 selection in the main menu.
+     */
+    if(solder_tip ==
+       SOLDER_TIP_C210)
+    {
+        UI_Solider_SetTipType(
+            SOLIDER_TIP_C210
+        );
+    }
+    else
+    {
+        UI_Solider_SetTipType(
+            SOLIDER_TIP_C245
+        );
+    }
 
     UI_Solider_Enter();
 

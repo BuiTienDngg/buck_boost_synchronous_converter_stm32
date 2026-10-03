@@ -1,0 +1,45 @@
+----------------------------------------------------------------------------------------------------------------------------------
+NCDrill File Report For: controller.PcbDoc   10/3/2026  10:36:16 AM
+----------------------------------------------------------------------------------------------------------------------------------
+
+Layer Pair : Top Layer to Bottom Layer
+ASCII RoundHoles File : controller-RoundHoles.TXT
+ASCII SlotHoles File : controller-SlotHoles.TXT
+ASCII RectHoles File : controller-RectHoles.TXT
+
+Tool       Hole Size               Hole Tolerance               Hole Type       Hole Count   Plated         Tool Travel
+----------------------------------------------------------------------------------------------------------------------------------
+T1      8mil (0.201mm)                                            Round             8         PTH        0.36inch (9.10mm)
+T2      20mil (0.5mm)                                             Round             78        PTH        18.93inch (480.89mm)
+T3      24mil (0.599mm)                                           Slot              4         PTH        1.14inch (29.03mm)
+T4      31mil (0.787mm)                                           Round             20        PTH        5.25inch (133.32mm)
+T5      32mil (0.8mm)                                             Round             4         PTH        2.96inch (75.18mm)
+T6      39mil (1.001mm)                                           Round             4         PTH        0.87inch (22.00mm)
+T7      40mil (1.016mm)                                           Round             2         PTH        0.10inch (2.54mm)
+T8      43mil (1.1mm)                                             Round             59        PTH        15.12inch (384.00mm)
+T9      79mil (1.999mm)                                           Rectangle         2         PTH        0.89inch (22.60mm)
+T10     126mil (3.2mm)                                            Round             4         PTH        9.24inch (234.75mm)
+T11     28mil (0.711mm)                                           Round             2         NPTH       0.31inch (8.00mm)
+----------------------------------------------------------------------------------------------------------------------------------
+Totals                                                                              187
+
+Two holes at same point : 16
+-----------------------
+3855,2555
+3855,2530
+3830,2530
+3855,2505
+3620,2560
+3620,2535
+3620,2510
+3135,4165
+3135,4190
+3135,4215
+3795,3395
+3795,3370
+3795,3345
+4030,3395
+4030,3370
+4030,3345
+
+Total Processing Time (hh:mm:ss) : 00:00:00

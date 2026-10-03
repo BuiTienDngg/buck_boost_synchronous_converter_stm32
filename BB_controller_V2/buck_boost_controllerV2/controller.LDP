@@ -1,0 +1,4 @@
+Layer Pairs Export File for PCB: D:\My_WorkSpace\Bung_Dui\buck_boost_machine\BB_controller_V2\controller.PcbDoc
+LayersSetName=Top_Bot_Thru_Holes|DrillFile=controller-roundholes.txt|DrillLayers=gtl,gbl
+LayersSetName=Top_Bot_Slot_Holes|DrillFile=controller-slotholes.txt|DrillLayers=gtl,gbl
+LayersSetName=Top_Bot_Rect_Holes|DrillFile=controller-rectholes.txt|DrillLayers=gtl,gbl

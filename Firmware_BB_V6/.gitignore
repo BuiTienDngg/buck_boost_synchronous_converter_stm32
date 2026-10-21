@@ -1,0 +1,12 @@
+build/
+tools/_deps/
+*.pyc
+__pycache__/
+
+# Local snapshots and generated outputs
+_backups/
+MDK-ARM/Firmware_BB_V6/
+MDK-ARM/*.uvguix.*
+MDK-ARM/*.uvoptx
+PC_App/dist/
+PC_App/build/

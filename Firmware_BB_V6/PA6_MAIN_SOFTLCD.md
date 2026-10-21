@@ -1,0 +1,7 @@
+# BBV6.40 - Main application with PA6 TIM3_CH1
+
+Normal application restored: PSU_PA6_PWM_PIN_TEST=0. PA6 active HIGH, PWM1, CC1P=0, 72 MHz / (PSC 0 + 1) / (ARR 7199 + 1) = 10 kHz. Boot and all OFF paths drive GPIO LOW. Thermal frame: 50 ms with 10 ms fully LOW for PA3 sampling, then 40 ms carrier PWM under thermal PID. TIM4 1 kHz runs CC/CV and application control. Temperature: 29 + (ADC - 1193) / 2 degrees C.
+
+The waveform-only hardware test worked when SPI1 initialization was skipped. Main now sets PSU_LCD_SOFT_SPI=1, skips MX_SPI1_Init and keeps SPI1 clock disabled. The SPI1 initialization function itself remains unchanged. LCD uses software mode-0 MSB-first transmission on its existing PA5 SCK / PA7 MOSI wires; no rewiring. GPIO writes touch only PA5/PA7 and leave PA6 under TIM3 control. Interrupts stay enabled; foreground OFF/USB/input service runs at least every 32 transmitted bytes. Setting PSU_LCD_SOFT_SPI=0 restores the legacy hardware SPI path but may reintroduce the PA6 conflict.
+
+Tests passed: software LCD wire 5/5 (actual SCK/MOSI bytes, command/data, CS, SPI1 clock off, PA6 isolation); thermal PWM 80/80 for both profiles; remote protocol 115/115; application 110/110. Foreground responsiveness 11/11 uses the existing simulated HAL transport, not a measured software LCD transfer time. CubeMX integration is idempotent. Keil and GCC builds fit below the settings region at 0x0800F800. v6.40 was programmed and verified through ST-LINK; user confirmed operation on 2026-10-22 (software SPI, run power, run solder).

@@ -1,0 +1,20 @@
+#include "psu_usb.h"
+#include "usb_device.h"
+#include "usbd_cdc_if.h"
+#include "usbd_cdc.h"
+/* USB device handle defined by USB_DEVICE/App/usb_device.c. */
+extern USBD_HandleTypeDef hUsbDeviceFS;
+
+#include <string.h>
+
+static uint8_t s_usb_packet[112];
+uint8_t PSU_USB_TryWrite(const uint8_t *data,uint16_t len) {
+    USBD_CDC_HandleTypeDef *cdc;
+    if (!data || len==0U || len>sizeof(s_usb_packet)) return 0U;
+    if (hUsbDeviceFS.dev_state!=USBD_STATE_CONFIGURED ||
+        !hUsbDeviceFS.pClassData) return 0U;
+    cdc=(USBD_CDC_HandleTypeDef *)hUsbDeviceFS.pClassData;
+    if (cdc->TxState!=0U) return 0U;
+    memcpy(s_usb_packet,data,len);
+    return (CDC_Transmit_FS(s_usb_packet,len)==USBD_OK)?1U:0U;
+}

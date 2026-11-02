@@ -1,0 +1,18 @@
+{
+  "source_files_changed": [
+    "Core/Inc/power_stage.h",
+    "Core/Inc/stm32f1xx_it.h",
+    "Core/Src/main.c",
+    "Core/Src/power_stage.c",
+    "Core/Src/psu_link.c",
+    "Core/Src/stm32f1xx_it.c",
+    "Core/Src/ui_lcd.c",
+    "Firmware_BB_V6.ioc"
+  ],
+  "hex_min": "0x8000000",
+  "hex_max": "0x800dc3f",
+  "flash_settings_begin": "0x0800f800",
+  "hex_data_bytes": 56384,
+  "sha256_hex": "f9edfc4feab3c2d94b36f24463d46271e5946308d8775f7a57ba07f313fda02a",
+  "backup": "D:\\My_project\\buck_boost_converter\\Firmware_BB_v7_backup_refresh_20261027_192419\\source_before_changes.zip"
+}

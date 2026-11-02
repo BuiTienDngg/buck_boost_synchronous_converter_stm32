@@ -1,5 +1,6 @@
 """BB V6 Power Studio. Launch normally or use --demo without a physical board."""
 from __future__ import annotations
+from protocol import THERMAL_FIELDS
 import argparse,csv,json,queue,time,tkinter as tk,sys,traceback,tempfile
 from tkinter import ttk,filedialog,messagebox
 from tkinter.scrolledtext import ScrolledText
@@ -20,7 +21,7 @@ class Studio(tk.Tk):
         self.title('BB V6 · DC Power Studio');self.geometry('1160x810');self.minsize(1000,700);self.configure(bg=BG)
         self.events=queue.Queue();self.worker=None;self.connected=False;self.ready=False;self.demo=False
         self.settings=defaults();self.caps=dict(SCHEMA['caps']);self.revision=0;self.latest={};self.last_rx=0.;self.last_ms=None
-        self.ramp_supported=False;self.solder_supported=False;self.solder_inputs={}
+        self.ramp_supported=False;self.solder_supported=False;self.solder_inputs={};self.thermal_inputs={};self.thermal_supported=False
         self.error_journal=FaultJournal();self.fault_rows={};self.fault_sequence=0
         self.pending={};self.on_after_set=False;self.loading=False;self.dirty=False;self.basic_dirty=False
         self.history=deque(maxlen=1200);self.event_log=deque(maxlen=200);self.csv_file=None;self.csv_writer=None;self.csv_rows=0
@@ -191,6 +192,7 @@ class Studio(tk.Tk):
             step=10**(-field['decimals'])
             entry=ttk.Spinbox(box,textvariable=var,from_=field['minimum'],to=field['maximum'],increment=step,width=10)
             entry.grid(row=row,column=1,sticky='ew',pady=5)
+            if field['key'] in THERMAL_FIELDS:self.thermal_inputs[field['key']]=entry;entry.configure(state='disabled')
             if field['key']=='ramp_v_per_s':
                 self.ramp_input=entry;entry.configure(state='disabled')
                 ttk.Label(box,text='Áp dụng khi OFF. Tăng Vset đi qua ramp;\ngiảm Vset có hiệu lực ngay.',background=CARD,foreground=MUTED,font=('Segoe UI',9)).grid(row=1,column=0,columnspan=3,sticky='w',pady=(7,0))
@@ -333,6 +335,10 @@ class Studio(tk.Tk):
     def apply_config(self):
         try:
             candidate=self.editor_settings()
+            if not self.thermal_supported:
+                for key in THERMAL_FIELDS:
+                    if candidate[key]!=self.settings[key]:raise ValueError('Firmware BBV6.48 required for thermal PID')
+                    candidate.pop(key)
             if self.solder_supported:
                 if candidate['solder_voltage']>candidate['vout_max'] or candidate['solder_current']>candidate['i_max']:
                     raise ValueError('Áp/dòng tay hàn không được vượt VOUT tối đa và dòng liên tục trong cấu hình.')
@@ -419,6 +425,8 @@ class Studio(tk.Tk):
         self.caps_var.set(f"Trần board: VIN {c.get('vin_mV',0)/1000:g} V · VOUT {c.get('vout_mV',0)/1000:g} V · {c.get('i_mA',0)/1000:g} A liên tục / {c.get('ipeak_mA',0)/1000:g} A đỉnh"+(f" · {c['power_mW']/1000:g} W" if 'power_mW' in c else '')+(f" · IIN {c['input_mA']/1000:g} A" if 'input_mA' in c else ''))
         self.ramp_supported='ramp_v_per_s' in reply['settings']
         self.solder_supported=SOLDER_FIELDS<=set(reply['settings'])
+        self.thermal_supported=THERMAL_FIELDS<=set(reply['settings'])
+        for entry in self.thermal_inputs.values():entry.configure(state='normal' if self.thermal_supported else 'disabled')
         for entry in self.solder_inputs.values():entry.configure(state='normal' if self.solder_supported else 'disabled')
         self.ramp_input.configure(state='normal' if self.ramp_supported else 'disabled')
         self.ramp_status_var.set(f"Ramp tăng áp · {self.settings['ramp_v_per_s']/1000:g} V/s"+('' if self.ramp_supported else ' (cố định)'))
@@ -574,7 +582,7 @@ def main():
         app.report_callback_exception=failed
         def verify():
             assert app.connected and app.ready and app.demo
-            assert len(app.field_vars)==39
+            assert len(app.field_vars)==43
             assert app.latest.get('protocol')==1 and not app.latest.get('enabled')
             app.apply_setpoint();app.after(350,verify_config)
         def verify_config():
@@ -582,21 +590,25 @@ def main():
             app.field_vars['cv_kp'].set('0.02000');app.field_vars['ramp_v_per_s'].set('2.50')
             app.field_vars['solder_voltage'].set('9.00');app.field_vars['solder_current'].set('2.00')
             for key,value in dict(vin_max='55',vout_max='50',i_max='13',i_peak='18',power_max='400',input_current_max='9').items():app.field_vars[key].set(value)
+            for key,value in dict(solder_kp='0.020000',solder_ki='0.003000',solder_kd='0.004000',solder_duty_max='42.0').items():app.field_vars[key].set(value)
             app.apply_config();app.after(350,finish)
         def finish():
             assert app.revision==1 and app.settings['cv_kp']==20000 and not app.dirty
             assert app.ramp_supported and app.settings['ramp_v_per_s']==2500
             assert app.solder_supported and app.settings['solder_voltage']==9000 and app.settings['solder_current']==2000
             assert all(app.settings[k]==v for k,v in dict(vin_max=55000,vout_max=50000,i_max=13000,i_peak=18000,power_max=400000,input_current_max=9000).items())
+            assert app.thermal_supported and app.settings['solder_kp']==20000 and app.settings['solder_duty_max']==42000
             result['limits_configurable']=True
             app.save_device();app.after(350,verify_saved)
         def verify_saved():
             assert not app.pending and app.worker.backend.saved['ramp_v_per_s']==2500
+            assert all(app.worker.backend.saved[k]==v for k,v in dict(solder_kp=20000,solder_ki=3000,solder_kd=4000,solder_duty_max=42000).items())
+            result['thermal_pid_saved']=True
             assert app.worker.backend.saved['solder_voltage']==9000 and app.worker.backend.saved['solder_current']==2000
             legacy=dict(app.worker.backend.reply(type('Req',(),dict(identifier=0,op='GET'))()))
-            legacy['settings']={k:v for k,v in legacy['settings'].items() if k not in SOLDER_FIELDS};legacy['fw']='BBV6.27'
+            legacy['settings']={k:v for k,v in legacy['settings'].items() if k not in SOLDER_FIELDS|THERMAL_FIELDS};legacy['fw']='BBV6.27'
             app.handle_reply(legacy)
-            assert app.ready and app.ramp_supported and not app.solder_supported
+            assert app.ready and app.ramp_supported and not app.solder_supported and not app.thermal_supported
             assert all(str(entry['state'])=='disabled' for entry in app.solder_inputs.values())
             legacy['settings'].pop('ramp_v_per_s');legacy['fw']='BBV6.7'
             app.handle_reply(legacy)

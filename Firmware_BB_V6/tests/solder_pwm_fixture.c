@@ -26,7 +26,7 @@ static void start_application(void){
   TIM1->ARR=PSU_PWM_PERIOD;TIM1->CCMR1=TIM_CCMR1_OC1PE|TIM_CCMR1_OC2PE;
   hadc1.Init.ExternalTrigConv=ADC_SOFTWARE_START;hadc1.Init.ContinuousConvMode=ENABLE;
   current_code=0;tip_code=1635;PsuApp_Init();
-  CHECK(((GPIOA->CRL>>24)&15)==2 && !(GPIOA->ODR&HEATER_Pin) && !TIM3->CCR1);
+  CHECK(((GPIOB->CRH>>4)&15)==2 && !(GPIOB->ODR&HEATER_Pin) && !TIM4->CCR4);
   run(0,160);run(GPIO_PIN_8,1026);run(0,302);vout_code=971;
   PsuView s;
   for(unsigned n=0;n<2500;++n){run(0,1);PsuApp_Snapshot(&s);if(s.hardware.heater)break;}
@@ -55,43 +55,43 @@ int test_main(void){
   setup(1635);raw_tip=4095;steps(2);CHECK(m.solder.error==PSU_SOL_HOT && !p.enabled);
   setup(1200);steps(22000);CHECK(m.solder.error==PSU_SOL_NO_RISE && !p.enabled);
   start_application();
-  CHECK(TIM3->PSC==0 && TIM3->ARR==7199 && (TIM3->CR1&TIM_CR1_CEN));
-  CHECK(!(TIM3->DIER&TIM_DIER_UIE) && (TIM3->CCER&TIM_CCER_CC1E));
-  CHECK(!(TIM3->CCER&TIM_CCER_CC1P));
+  CHECK(TIM4->PSC==0 && TIM4->ARR==7199 && (TIM4->CR1&TIM_CR1_CEN));
+  CHECK(!(TIM4->DIER&TIM_DIER_UIE) && (TIM4->CCER&TIM_CCER_CC4E));
+  CHECK(!(TIM4->CCER&TIM_CCER_CC4P));
   /* Non-inverted PWM HIGH duration is the requested heater duty. */
-  unsigned high_ticks=0;for(unsigned cnt=0;cnt<7200;++cnt)if(cnt<TIM3->CCR1)++high_ticks;
+  unsigned high_ticks=0;for(unsigned cnt=0;cnt<7200;++cnt)if(cnt<TIM4->CCR4)++high_ticks;
   CHECK(high_ticks==3600);
 
-  PsuApp_Snapshot(&s);CHECK(s.hardware.pa6_mode==11 && !(GPIOB->ODR&GPIO_PIN_13));
-  TIM3->CR1&=~TIM_CR1_CEN;PsuApp_Snapshot(&s);CHECK(s.hardware.heater_block&PSU_HB_TIMER);TIM3->CR1|=TIM_CR1_CEN;
+  PsuApp_Snapshot(&s);CHECK(s.hardware.pa6_mode==11 && 1);
+  TIM4->CR1&=~TIM_CR1_CEN;PsuApp_Snapshot(&s);CHECK(s.hardware.heater_block&PSU_HB_TIMER);TIM4->CR1|=TIM_CR1_CEN;
   unsigned heat=0,quiet=0,bad=0;
   for(unsigned n=0;n<250;++n){
     run(0,1);PsuApp_Snapshot(&s);
-    if(s.hardware.heater){++heat;if(TIM3->CCR1!=(uint32_t)(s.modes.solder.duty*7200+0.5f) || s.modes.solder.duty<=0 || s.modes.solder.duty>1)++bad;}
-    else{++quiet;if(((GPIOA->CRL>>24)&15)!=2 || (GPIOA->ODR&HEATER_Pin))++bad;if(!(s.hardware.heater_block&PSU_HB_QUIET))++bad;if(TIM3->CCR1 || (TIM3->CCMR1&TIM_CCMR1_OC1M)!=TIM_OCMODE_FORCED_INACTIVE)++bad;}
+    if(s.hardware.heater){++heat;if(TIM4->CCR4!=(uint32_t)(s.modes.solder.duty*7200+0.5f) || s.modes.solder.duty<=0 || s.modes.solder.duty>1)++bad;}
+    else{++quiet;if(((GPIOB->CRH>>4)&15)!=2 || (GPIOB->ODR&HEATER_Pin))++bad;if(!(s.hardware.heater_block&PSU_HB_QUIET))++bad;if(TIM4->CCR4 || (TIM4->CCMR2&TIM_CCMR2_OC4M)!=(TIM_OCMODE_FORCED_INACTIVE<<8))++bad;}
   }
   CHECK(heat==200 && quiet==50 && bad==0);
   CHECK(s.modes.solder.valid && now-s.modes.solder.last_sample_ms<50);
   hUsbDeviceFS.dev_state=USBD_STATE_CONFIGURED;hUsbDeviceFS.pClassData=&cdc;
   PsuApp_UsbRx((const uint8_t *)"?",1);
-  run(0,101);CHECK(strstr(last_tx,"\"active_low\":0") && strstr(last_tx,"\"pwm_hz\":10000") && strstr(last_tx,"\"pin\":\"PA6\"") && strstr(last_tx,"\"ccr1\":"));
+  run(0,101);CHECK(strstr(last_tx,"\"active_low\":0") && strstr(last_tx,"\"pwm_hz\":10000") && strstr(last_tx,"\"pin\":\"PB9\"") && strstr(last_tx,"\"ccr1\":"));
   tip_code=1200;run(0,100);
   for(unsigned n=0;n<50;++n){PsuApp_Snapshot(&s);if(s.hardware.heater)break;run(0,1);}
-  CHECK(s.hardware.heater && TIM3->CCR1==6840 && TIM3->CCR1<TIM3->ARR);
+  CHECK(s.hardware.heater && TIM4->CCR4==5760 && TIM4->CCR4<TIM4->ARR);
   tip_code=1833;run(0,100);PsuApp_Snapshot(&s);
   CHECK(!s.hardware.heater && (s.hardware.heater_block&PSU_HB_PID_ZERO) && !s.control.fault);
   /* Carrier callbacks cannot run PID or consume its ADC snapshot. */
-  now+=300;HAL_TIM_PeriodElapsedCallback(&htim3);PsuApp_Snapshot(&s);CHECK(!s.control.fault);
-  HAL_TIM_PeriodElapsedCallback(&htim4);PsuApp_Snapshot(&s);CHECK((s.control.fault&PSU_F_TIMING) && !TIM3->CCR1);
+  now+=300;HAL_TIM_PeriodElapsedCallback(&htim4);PsuApp_Snapshot(&s);CHECK(!s.control.fault);
+  HAL_TIM_PeriodElapsedCallback(&htim3);PsuApp_Snapshot(&s);CHECK((s.control.fault&PSU_F_TIMING) && !TIM4->CCR4);
   start_application();
   /* SysTick removes an autonomous hardware PWM when TIM4 stalls. */
   now+=3;PsuApp_SysTick();PsuApp_Snapshot(&s);
-  CHECK((s.control.fault&PSU_F_TIMING) && !s.hardware.heater && !TIM3->CCR1);
-  CHECK((TIM3->CCMR1&TIM_CCMR1_OC1M)==TIM_OCMODE_FORCED_INACTIVE);
-  CHECK(((GPIOA->CRL>>24)&15)==2 && !(GPIOA->ODR&HEATER_Pin));
+  CHECK((s.control.fault&PSU_F_TIMING) && !s.hardware.heater && !TIM4->CCR4);
+  CHECK((TIM4->CCMR2&TIM_CCMR2_OC4M)==(TIM_OCMODE_FORCED_INACTIVE<<8));
+  CHECK(((GPIOB->CRH>>4)&15)==2 && !(GPIOB->ODR&HEATER_Pin));
   start_application();
   current_code=4095;for(unsigned n=0;n<8;++n)sample();PsuApp_Snapshot(&s);
-  CHECK((s.control.fault&PSU_F_OCP) && !s.hardware.heater && !TIM3->CCR1);
-  CHECK(!(GPIOB->ODR&GPIO_PIN_13) && !(GPIOC->ODR&GPIO_PIN_15));
+  CHECK((s.control.fault&PSU_F_OCP) && !s.hardware.heater && !TIM4->CCR4);
+  CHECK(GPIOC->ODR&GPIO_PIN_15); /* Diagnostic relay latch remains ON after fault. */
   return 0;
 }

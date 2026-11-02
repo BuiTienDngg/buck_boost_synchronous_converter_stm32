@@ -1,0 +1,18 @@
+{
+  "modulation": "buck_HS=D; boost_HS=1-D; both PWM1; no 500Hz refresh",
+  "pwm_hz": 20000,
+  "control_hz": 2000,
+  "source_files_changed": [
+    "Core/Inc/power_stage.h",
+    "Core/Inc/stm32f1xx_it.h",
+    "Core/Src/power_stage.c",
+    "Core/Src/stm32f1xx_it.c"
+  ],
+  "hex_data_bytes": 54112,
+  "hex_min": "0x8000000",
+  "hex_max": "0x800d35f",
+  "flash_settings_begin": "0x0800f800",
+  "sha256_hex": "845dbc8a7825b28d562937cd612fff8344f15c6ab3069f4c745296e75bc4ef8b",
+  "backup": "D:\\My_project\\buck_boost_converter\\Firmware_BB_v7_backup_D1D_20261027_201151\\before_D1D.zip",
+  "tests": 434
+}

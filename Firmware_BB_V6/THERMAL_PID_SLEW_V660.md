@@ -1,0 +1,9 @@
+# BBV6.60 - thermal PID reduction shaping
+
+Audit found three different duty drops: filtered derivative kick from inter-frame temperature steps, immediate application of the PID request, and the mandatory 15 ms OFF/50 ms sampling cycle. Rail voltage below 70% also immediately stops heater PWM and restarts its supply-recovery ramp. A post-fault telemetry snapshot cannot by itself prove which happened first.
+
+Changes: limit D contribution to +/-0.15 duty; below active target, ordinary PID decreases are limited to 0.10 duty per 50 ms frame. Freeze integration while applied heat exceeds the requested heat because of this limiter. No downward slew delay at/above target, after target changes, when a lowered ceiling requires less heat, on rail recovery, STOP or any protection. Maximum heater duty remains min(app setting,80%); 5 s startup ramp, 15 ms quiet/35 ms heat, source 25 kHz, heater 10 kHz, source CV/CC and switch-by-mode remain unchanged.
+
+New solder telemetry (permille): pid_demand_pm is the clipped PID demand before slew; heat_cmd_pm is the applied heat-window command; pid_dterm_pm is the limited D contribution; slew_limited indicates a normal reduction being shaped. During the quiet window duty_pm=0 is intentional even if heat_cmd_pm is positive. After an error the last demand/D/heat command is retained for diagnosis while actual heater/PWM is OFF. stop_fault, stop_flags and stop_ms retain the first stop context. USB CLEAR now also clears old timing diagnostics consistently.
+
+Validation: thermal transient/quiet target change/immediate shutdown 33/33; thermal config/hard cap 22/22; source OVP 14/14; HEALTH diagnostics 26/26; mode switch/fault routing 14/14; application 110/110; USB 115/115. Keil build passed. Not flashed or bench tuned. The mandatory quiet interval still abruptly removes heater load; this change does not prove source OVP is solved.

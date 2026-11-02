@@ -7,7 +7,7 @@ from unicorn.arm_const import UC_ARM_REG_SP,UC_ARM_REG_LR,UC_ARM_REG_PC
 out=ROOT/'build/tests';out.mkdir(parents=True,exist_ok=True)
 gcc=shutil.which('arm-none-eabi-gcc');tools=Path(gcc).parent
 inc=['Core/Inc','Drivers/STM32F1xx_HAL_Driver/Inc','Drivers/CMSIS/Include','Drivers/CMSIS/Device/ST/STM32F1xx/Include','USB_DEVICE/App','USB_DEVICE/Target','Middlewares/ST/STM32_USB_Device_Library/Core/Inc','Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Inc']
-fixtures = ['modes','menu','shortcut','foreground','solder_pwm','solder_pwm_normal','bench','pin_test','lcd_bus']
+fixtures = ['modes','menu','shortcut','foreground','solder_pwm','solder_pwm_normal','bench','pin_test','lcd_bus','duty','solder_ramp','ovp4','relay_latch','health_detail','solder_config','hold_mode','r1r','ratio95','thermal_slew','solder_sleep','solder_beep','solder_settle','solder_load']
 unknown = set(sys.argv[1:])-set(fixtures)
 if unknown:raise SystemExit('Unknown/superseded fixture: '+', '.join(sorted(unknown))+'. Use solder_pwm for the current heater.')
 for name in fixtures:
@@ -16,7 +16,7 @@ for name in fixtures:
     if name=='foreground':sources+=['psu_display']
     elf=out/(name+'.elf')
     fixture = name.removesuffix('_normal')
-    subprocess.run([gcc,'-mcpu=cortex-m3','-mthumb','-Os','-std=c99','-ffunction-sections','-fdata-sections','-DUSE_HAL_DRIVER','-DSTM32F103xB',*(['-DPSU_LCD_SOFT_SPI=0'] if name=='foreground' else []),*(['-DPSU_PA6_PWM_PIN_TEST=1'] if name=='pin_test' else []),*(['-DPSU_SOLDER_TEST18=0'] if name not in ('foreground','solder_pwm') else []),*['-I'+str(ROOT/p) for p in inc],*[str(ROOT/'Core/Src'/f'{s}.c') for s in sources],str(ROOT/'tests'/f'{fixture}_fixture.c'),'-nostartfiles','--specs=nano.specs','--specs=nosys.specs','-Wl,-e,test_main','-Wl,-Ttext=0x10000','-Wl,-Tdata=0x20000000','-Wl,--gc-sections','-lm','-o',str(elf)],check=True)
+    subprocess.run([gcc,'-mcpu=cortex-m3','-mthumb','-Os','-std=c99','-ffunction-sections','-fdata-sections','-DUSE_HAL_DRIVER','-DSTM32F103xB',*(['-DPSU_SOLDER_RAMP_MS=0','-DPSU_SOLDER_QUIET_MS=10'] if name in ('solder_pwm','solder_pwm_normal') else []),*(['-DPSU_LCD_SOFT_SPI=0'] if name=='foreground' else []),*(['-DPSU_PA6_PWM_PIN_TEST=1'] if name=='pin_test' else []),*(['-DPSU_SOLDER_TEST18=0'] if name not in ('foreground','solder_pwm') else []),*['-I'+str(ROOT/p) for p in inc],*[str(ROOT/'Core/Src'/f'{s}.c') for s in sources],str(ROOT/'tests'/f'{fixture}_fixture.c'),'-nostartfiles','--specs=nano.specs','--specs=nosys.specs','-Wl,-e,test_main','-Wl,-Ttext=0x10000','-Wl,-Tdata=0x20000000','-Wl,--gc-sections','-lm','-o',str(elf)],check=True)
     symbols={p[2]:int(p[0],16) for line in subprocess.check_output([str(tools/'arm-none-eabi-nm.exe'),str(elf)],text=True).splitlines() if len(p:=line.split())==3 and p[1].lower()!='u'}
     emu=Uc(UC_ARCH_ARM,UC_MODE_THUMB|UC_MODE_MCLASS)
     for address,size in [(0,0x100000),(0x20000000,0x10000),(0x40000000,0x30000),(0xE0000000,0x100000)]:emu.mem_map(address,size)
@@ -27,18 +27,18 @@ for name in fixtures:
     if name.startswith('solder'):
         read=lambda at:struct.unpack('<I',emu.mem_read(at,4))[0]
         def carrier_write(uc,access,address,size,value,user):
-            active=(value&0x70)==0x60 and read(0x40000434)>0
+            active=(value&0x7000)==0x6000 and read(0x40000840)>0
             if quiet_checks['active'] and not active:
                 quiet_checks['since']=read(symbols['now'])
             quiet_checks['active']=active
         def adc_sample(uc,address,size,user):
-            if not read(symbols['dma']):return
-            enabled=bool(read(0x40000420)&1)
-            pwm=(read(0x40000418)&0x70)==0x60
-            assert not (enabled and pwm and read(0x40000434)>0),'Tip ADC sampled with TIM3_CH1 PWM active'
+            if 'dma' not in symbols or not read(symbols['dma']):return
+            enabled=bool(read(0x40000820)&1)
+            pwm=(read(0x4000081c)&0x7000)==0x600000
+            assert not (enabled and pwm and read(0x40000840)>0),'Tip ADC sampled with TIM3_CH1 PWM active'
             assert ((read(symbols['now'])-quiet_checks['since'])&0xffffffff)>=2,'Tip ADC sampled before 2 ms settling'
             quiet_checks['count']+=1
-        emu.hook_add(UC_HOOK_MEM_WRITE,carrier_write,begin=0x40000418,end=0x4000041b)
+        emu.hook_add(UC_HOOK_MEM_WRITE,carrier_write,begin=0x4000081c,end=0x4000081f)
         addr=symbols['PsuSolder_Sample']&~1;emu.hook_add(UC_HOOK_CODE,adc_sample,begin=addr,end=addr)
     wire=[]
     if name=='lcd_bus':

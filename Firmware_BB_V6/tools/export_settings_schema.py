@@ -3,6 +3,10 @@ from pathlib import Path
 import json,re
 ROOT=Path(__file__).resolve().parents[1]
 META={
+'solder_kp':('PID tay han','Kp nhiet','duty/C',6),
+'solder_ki':('PID tay han','Ki nhiet','duty/C/s',6),
+'solder_kd':('PID tay han','Kd nhiet','duty*s/C',6),
+'solder_duty_max':('PID tay han','Duty toi da','%',1),
 'cv_kp':('PID điện áp CV','Kp điện áp','ratio/V',5),
 'cv_ki':('PID điện áp CV','Ki điện áp','ratio/V/s',4),
 'cv_kd':('PID điện áp CV','Kd điện áp','ratio·s/V',6),

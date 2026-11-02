@@ -1,0 +1,13 @@
+{
+  "current_gain": 100,
+  "shunt_ohms": 0.001,
+  "volts_per_amp": 0.1,
+  "source_files_changed": [
+    "Core/Inc/analog_monitor.h",
+    "Core/Src/power_stage.c"
+  ],
+  "validation": "446 ARM assertions, zero failures; Keil zero errors/warnings",
+  "hex_max": "0x800d35f",
+  "sha256_hex": "d58b02682caa3d2fd2cef1befe41fc82cd199fb9cdf6e8bf881c6a453574740d",
+  "backup": "D:\\My_project\\buck_boost_converter\\Firmware_BB_v7_backup_gain100_20261027_214047\\before_gain100.zip"
+}

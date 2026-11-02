@@ -8,7 +8,7 @@
 
 /* Keep SPI1 clock disabled so PA6 can output TIM3_CH1. LCD uses existing PA5/PA7. */
 #ifndef PSU_LCD_SOFT_SPI
-#define PSU_LCD_SOFT_SPI 1
+#define PSU_LCD_SOFT_SPI 0
 #endif
 
 /* Actual, unmodified hardware values supplied by the board owner. */
@@ -38,7 +38,7 @@
 #endif
 #define PSU_NTC_CONFIGURED         1
 /* Provisional NTC configuration explicitly requested by the board owner. */
-#define PSU_NTC_R25_OHM            10000.0f
+#define PSU_NTC_R25_OHM            50000.0f
 #define PSU_NTC_PULL_OHM           10000.0f
 #define PSU_NTC_BETA_K             3950.0f
 #define PSU_NTC_TO_GND             1
@@ -59,8 +59,9 @@
 #define PSU_TEMP_WARN_C            70.0f
 #define PSU_TEMP_TRIP_C            85.0f
 #define PSU_TEMP_RESET_C           60.0f
-#define PSU_PWM_HZ                 10000u
-#define PSU_PWM_PERIOD             7199u
+#define PSU_HEATER_PWM_PERIOD     7199u /* Heater TIM4 stays at 10 kHz. */
+#define PSU_PWM_HZ                 25000u
+#define PSU_PWM_PERIOD             2879u
 /* User-authorized gentle, open-loop capacitor discharge through Q2/L4/Q3.
    Estimated delta-I only: the output shunt does NOT measure this current.
    Each pulse is ended by TIM1 hardware OPM; never repeated at 10 kHz. */
@@ -87,6 +88,11 @@
 #define PSU_BUZZER_ENABLED         1
 #define PSU_BUZZER_ACTIVE_HIGH     1
 #define PSU_LCD_BGR                1
+/* This panel needs normal display polarity. INVON complements black/white
+   and green/magenta; RGB/BGR only exchanges the red and blue channels. */
+#ifndef PSU_LCD_INVERT
+#define PSU_LCD_INVERT             0
+#endif
 #define PSU_LCD_X_OFFSET           0
 #define PSU_LCD_Y_OFFSET           0
 

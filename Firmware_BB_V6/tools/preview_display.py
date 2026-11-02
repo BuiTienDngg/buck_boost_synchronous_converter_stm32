@@ -14,11 +14,11 @@ elf=BUILD/'display.elf';binary=elf.with_suffix('.bin')
 subprocess.run([gcc,*args,str(ROOT/'Core/Src/psu_display.c'),str(ROOT/'Core/Src/psu_modes.c'),str(ROOT/'Core/Src/psu_control.c'),str(ROOT/'Core/Src/psu_settings.c'),str(ROOT/'tests/display_fixture.c'),'-nostartfiles','--specs=nano.specs','--specs=nosys.specs','-Wl,-e,preview','-Wl,-Ttext=0x10000','-Wl,-Tdata=0x20000000','-Wl,--gc-sections','-lm','-o',str(elf)],check=True)
 symbols={p[2]:int(p[0],16) for l in subprocess.check_output([str(tools/'arm-none-eabi-nm.exe'),str(elf)],text=True).splitlines() if len(p:=l.split())==3 and p[1].lower()!='u'}
 subprocess.run([str(tools/'arm-none-eabi-objcopy.exe'),'-O','binary','--only-section=.text','--only-section=.rodata',str(elf),str(binary)],check=True)
-for scenario,name in enumerate(['normal','fault','locked','blocked','ovp','discharge','discharge_stopped','discharge_done','ramp','digit_voltage','digit_current','digit_moved','output_off','large_values','menu_root','menu_ramp','menu_charge_edit','menu_charge_back','charge_cc','charge_full','charge_error','solder','charge_pre','menu_stop_first','menu_fault','graph_cv','graph_cc','graph_fault','graph_gaps','menu_display','graph_clock_wrap','graph_full_scale','graph_back_to_number','graph_long_gap','graph_off','menu_solder','solder_stand','solder_no_rise','solder_c210','solder_back_lab','solder_adc_wait','menu_solder_target','solder_sensor_invalid','solder_overtemperature','solder_temperature_changed','solder_temperature_static']):
+for scenario,name in enumerate(['normal','fault','locked','blocked','ovp','discharge','discharge_stopped','discharge_done','ramp','digit_voltage','digit_current','digit_moved','output_off','large_values','menu_root','menu_ramp','menu_charge_edit','menu_charge_back','charge_cc','charge_full','charge_error','solder','charge_pre','menu_stop_first','menu_fault','graph_cv','graph_cc','graph_fault','graph_gaps','menu_display','graph_clock_wrap','graph_full_scale','graph_back_to_number','graph_long_gap','graph_off','menu_solder','solder_stand','solder_no_rise','solder_c210','solder_back_lab','solder_adc_wait','menu_solder_target','solder_sensor_invalid','solder_overtemperature','solder_temperature_changed','solder_temperature_static','unchanged','one_digit','solder_duty_update','solder_one_digit','shrinking_field','menu_selection','solder_bar_half','solder_bar_over','solder_bar_zero','solder_limit_changed','solder_preset_350','solder_off','solder_protect','solder_clock_tick']):
     emu=Uc(UC_ARCH_ARM,UC_MODE_THUMB|UC_MODE_MCLASS);emu.mem_map(0,0x100000);emu.mem_map(0x20000000,0x10000);emu.mem_write(0x10000,binary.read_bytes())
     emu.reg_write(UC_ARM_REG_SP,0x2000FFF0);emu.reg_write(UC_ARM_REG_LR,0x101);emu.reg_write(UC_ARM_REG_R0,scenario)
     screen=Image.new('RGB',(320,240));pixels=screen.load()
-    bus={'cs':1,'dc':1,'command':0,'params':bytearray(),'x0':0,'x1':319,'y0':0,'y1':239,'x':0,'y':0,'pending':None}
+    bus={'cs':1,'dc':1,'command':0,'params':bytearray(),'x0':0,'x1':319,'y0':0,'y1':239,'x':0,'y':0,'pending':None,'inverted':False,'format':None,'madctl':None}
     def hook(uc,address,size,user):
         if address==(symbols['HAL_GPIO_WritePin']&~1):
             port=uc.reg_read(UC_ARM_REG_R0);pin=uc.reg_read(UC_ARM_REG_R1);level=uc.reg_read(UC_ARM_REG_R2)
@@ -30,7 +30,10 @@ for scenario,name in enumerate(['normal','fault','locked','blocked','ovp','disch
             assert bus['cs']==0
             if not bus['dc']:
                 bus['command']=data[0];bus['params']=bytearray()
+                if data[0] in (0x20,0x21):bus['inverted']=data[0]==0x21
                 if data[0]==0x2C:bus['x']=bus['x0'];bus['y']=bus['y0'];bus['pending']=None
+            elif bus['command'] in (0x3A,0x36):
+                bus['format' if bus['command']==0x3A else 'madctl']=data[0]
             elif bus['command'] in (0x2A,0x2B):
                 bus['params']+=data
                 if len(bus['params'])==4:
@@ -41,6 +44,7 @@ for scenario,name in enumerate(['normal','fault','locked','blocked','ovp','disch
                     else:
                         color=bus['pending']*256+byte;bus['pending']=None;x=bus['x'];y=bus['y']
                         assert 0<=x<320 and 0<=y<240,(x,y)
+                        if bus['inverted']:color^=0xffff
                         pixels[x,y]=((color>>11)*255//31,((color>>5)&63)*255//63,(color&31)*255//31)
                         bus['x']+=1
                         if bus['x']>bus['x1']:bus['x']=bus['x0'];bus['y']+=1
@@ -49,6 +53,17 @@ for scenario,name in enumerate(['normal','fault','locked','blocked','ovp','disch
         at=symbols[function]&~1;emu.hook_add(UC_HOOK_CODE,hook,begin=at,end=at)
     emu.emu_start(symbols['preview']|1,0x100,count=30_000_000)
     assert emu.reg_read(UC_ARM_REG_PC)==0x100
+    assert not bus['inverted'], 'Panel inversion enabled: black/white and green/magenta would be reversed'
+    assert bus['format']==0x55 and bus['madctl']==0x68, 'RGB565 / panel orientation / BGR changed'
+    if 46<=scenario<=51:
+        import struct
+        count=struct.unpack('<I',emu.mem_read(symbols['preview_bytes'],4))[0]
+        limits={46:0,47:1400,48:0,49:5400,50:1800,51:10000}
+        assert count<=limits[scenario],(name,count,limits[scenario])
+        if scenario not in (46,48):assert count>0,(name,'Update missing')
+        print('Incremental bytes:',name,count)
+    if scenario in (0,1,2,3,4,5,6,7,8,9,10,11,12,13,18,19,20,22,25,26,27,28,30,31,32,33,34,39,46,47,50):
+        assert all(pixels[x,y]==(0,0,0) for x in range(210,312) for y in range(4,29)), 'Top-right badge not removed'
     # Underline indicates the selected decimal column, including a move
     # without any setpoint change. The previous underline must be erased.
     if scenario in (0,9,10,11):
@@ -59,20 +74,37 @@ for scenario,name in enumerate(['normal','fault','locked','blocked','ovp','disch
     # OUT belongs on the left; preset M1 belongs on the right.
     rgb=lambda c:((c>>11)*255//31,((c>>5)&63)*255//63,(c&31)*255//31)
     if scenario<35 and scenario not in (14,15,16,17,21,23,24,29):
-        color=0xF9A6 if scenario in (1,4,27) else 0x3F37 if scenario in (0,8,9,10,11,13,18,21,22,25,26,28,30,31,32,33) else 0x10A5
+        color=0xF9A6 if scenario in (1,4,27) else 0x07E0 if scenario in (0,8,9,10,11,13,18,21,22,25,26,28,30,31,32,33) else 0x0000
         assert pixels[8,215]==rgb(color),'OUT status missing on the left'
-        assert pixels[148,215]==rgb(0x2E7F),'M1 missing on the right'
+        assert pixels[148,215]==rgb(0xF81F),'M1 missing on the right'
     if 25<=scenario<=34:
         import struct
         assert struct.unpack('<H',emu.mem_read(symbols['graph_count'],2))[0]==121,'Graph ring count/wrap failed'
         if scenario not in (29,32,33):
             area=[pixels[x,y] for y in range(76,150) for x in range(40,281)]
-            assert area.count(rgb(0x3F37))>80 and area.count(rgb(0x2E7F))>80,'Both traces must be present'
+            assert area.count(rgb(0x07E0))>80 and area.count(rgb(0xF81F))>80,'Both traces must be present'
         if scenario==32:assert pixels[112,161]==rgb(0xF9A6),'NUMBER digit highlight did not return'
         if scenario==33:
             history=struct.unpack('<242H',emu.mem_read(symbols['graph_history'],484))
             assert sum(n==65535 for n in history)>=240,'Missed history must be gaps'
+    if scenario>=52:
+        import struct
+        count=struct.unpack('<I',emu.mem_read(symbols['preview_bytes'],4))[0]
+        if scenario==52:assert count==0,('Static solder screen redrawn',count)
+        if scenario==59:assert 0<count<1400,('Clock redrew unrelated areas',count)
+        fill=0 if scenario in (54,57,58) else 294 if scenario==53 else 73 if scenario==55 else 147
+        ink=rgb(0xF9A6 if scenario==53 else 0x07E0)
+        for x in range(294):
+            assert pixels[13+x,137]==(ink if x<fill else (0,0,0)),('Bar span',scenario,x)
+        if scenario==56:
+            assert pixels[216,204]==rgb(0x07E0) and pixels[114,204]==rgb(0xF81F),'Preset highlight did not move'
+        print('Solder final update bytes:',name,count)
+    if scenario==36:
+        assert pixels[220,8]==(0,0,0) and pixels[222,8]==rgb(0xF9A6), 'Sleep header must show 200C, not the normal 300C target'
+        assert pixels[114,204]==rgb(0xF81F), 'Normal preset must not be marked active while sleeping'
     screen.resize((960,720),Image.Resampling.NEAREST).save(BUILD/(name+'.png'))
     print('Rendered actual C driver:',name)
 
 assert (BUILD/'solder_temperature_changed.png').read_bytes()==(BUILD/'solder_temperature_static.png').read_bytes(), 'Temperature display must refresh when ADC stays constant'
+
+

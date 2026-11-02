@@ -16,6 +16,7 @@ ERRORS['local_mode_required']='Chế độ/menu trên thiết bị đang khóa t
 CHARGE_REASONS={1:'Không có pin hoặc điện áp quá thấp',2:'Điện áp pin cao hơn cấu hình pack',3:'Kiểm tra cảm biến, nguồn vào và BMS',4:'Hết thời gian sạc',5:'Hết thời gian sạc phục hồi',6:'Không có dòng sạc',7:'Cấu hình pin vượt giới hạn nguồn',8:'Đang chờ chuyển đầu ra'}
 SOLDER_REASONS={1:'Cảm biến mũi lỗi — kiểm tra PA3',2:'Mất dữ liệu nhiệt mũi',3:'Nhiệt mũi vượt ngưỡng an toàn',4:'Cấp nhiệt nhưng nhiệt độ không tăng',5:'Nguồn tay hàn chưa ổn định',6:'Kiểm tra VIN, nhiệt FET và ADC',7:'Profile tay hàn vượt giới hạn nguồn'}
 SOLDER_FIELDS={'solder_voltage','solder_current'}
+THERMAL_FIELDS={'solder_kp','solder_ki','solder_kd','solder_duty_max'}
 
 def scaled(key:str,text:str)->int:
     field=FIELDS[key]
@@ -30,7 +31,9 @@ def defaults()->dict[str,int]:return {key:scaled(key,str(f['default'])) for key,
 
 def _complete_settings(settings:dict[str,int])->dict[str,int]:
     if not isinstance(settings,dict):raise ValueError('Cấu hình phải là một object.')
-    keys=set(settings);all_keys=set(FIELDS)
+    keys=set(settings);all_keys=set(FIELDS)-THERMAL_FIELDS
+    if keys&THERMAL_FIELDS not in (set(),THERMAL_FIELDS):raise ValueError("Incomplete thermal PID settings")
+    keys=keys-THERMAL_FIELDS
     if keys not in (all_keys,all_keys-{'ramp_v_per_s'},all_keys-SOLDER_FIELDS,all_keys-SOLDER_FIELDS-{'ramp_v_per_s'}):
         raise ValueError('Profile thiếu thông số hoặc khác phiên bản schema.')
     return dict(defaults(),**settings)

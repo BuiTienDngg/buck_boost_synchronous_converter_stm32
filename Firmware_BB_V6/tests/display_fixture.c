@@ -2,10 +2,11 @@
 #include <string.h>
 SPI_HandleTypeDef hspi1;
 static uint32_t preview_ms;
+uint32_t preview_bytes;
 uint32_t HAL_GetTick(void){return preview_ms;}
-HAL_StatusTypeDef HAL_SPI_Transmit(SPI_HandleTypeDef *h,const uint8_t *p,uint16_t n,uint32_t t) { (void)h;(void)p;(void)n;(void)t;return HAL_OK; }
+HAL_StatusTypeDef HAL_SPI_Transmit(SPI_HandleTypeDef *h,const uint8_t *p,uint16_t n,uint32_t t) { (void)h;(void)p;(void)t;preview_bytes+=n;return HAL_OK; }
 void HAL_GPIO_WritePin(GPIO_TypeDef *g,uint16_t p,GPIO_PinState s) {(void)g;(void)p;(void)s;}
-void HAL_Delay(uint32_t n) {(void)n;}
+void HAL_Delay(uint32_t n) {preview_ms+=n;}
 void Error_Handler(void) {for(;;){}}
 void preview(unsigned scenario) {
   PsuView s;memset(&s,0,sizeof(s));PsuSettings_Defaults(&s.control.settings);
@@ -44,6 +45,7 @@ void preview(unsigned scenario) {
   if(scenario==21){s.modes.solder.on_ms=18;s.hardware.heater=1;s.modes.mode=PSU_MODE_SOLDER;s.modes.solder_request=s.modes.solder_on=1;s.modes.solder.phase=PSU_SOL_RUN;s.modes.solder.valid=1;s.modes.solder.temperature=299;s.modes.solder.raw=1522;s.modes.solder.active_target=300;s.control.vout=24;s.control.current=2.1f;}
   if(scenario==22){s.modes.mode=PSU_MODE_CHARGE;s.modes.cells=6;s.modes.chemistry=PSU_CELL_LIFEPO4;s.modes.phase=PSU_CH_PRE;s.control.vout=15.5f;s.control.current=0.05f;s.control.current_set=0.05f;s.edit_current=1;}
   if(scenario==23 || scenario==24){s.menu.page=PSU_MENU_ROOT;s.menu.selected=2;s.menu.notice=1;if(scenario==24){s.control.fault=PSU_F_OCP;s.control.enabled=0;}}
+  if(scenario==47)s.control.current=0;
   PsuDisplay_Init();PsuDisplay_Update(&s);
   if(scenario>=25 && scenario<=34){
     s.control.initialized=1;s.control.adc_age_ms=1;s.menu.display=PSU_DISPLAY_GRAPH;
@@ -70,7 +72,7 @@ void preview(unsigned scenario) {
     /* A long missed update becomes gaps, not fabricated intermediate data. */
     if(scenario==33){preview_ms+=40000;PsuDisplay_Update(&s);}
   }
-  if(scenario>=35){
+  if((scenario>=35 && scenario<=45) || scenario>=52){
     s.modes.mode=PSU_MODE_SOLDER;s.modes.solder_request=s.modes.solder_on=1;s.modes.solder.phase=PSU_SOL_RUN;
     s.modes.solder.valid=1;s.modes.solder.temperature=298;s.modes.solder.raw=1521;s.modes.solder.active_target=300;s.control.vout=24;s.control.current=2.1f;
     if(scenario==35 || scenario==41){s.menu.page=PSU_MENU_SOLDER;s.menu.selected=scenario==41?1:0;s.menu.editing=scenario==41;}
@@ -85,6 +87,33 @@ void preview(unsigned scenario) {
     PsuDisplay_Update(&s);
     if(scenario==44){s.modes.solder.temperature=301;PsuDisplay_Update(&s);}
     if(scenario==39){s.modes.mode=PSU_MODE_LAB;s.control.enabled=0;s.control.voltage_set=5;s.control.current_set=1;PsuDisplay_Update(&s);}
+  }
+  if(scenario>=46 && scenario<=51){
+    if(scenario==48 || scenario==49){
+      s.modes.mode=PSU_MODE_SOLDER;s.modes.solder.valid=1;s.modes.solder.temperature=298;
+      s.modes.solder.command=.40f;PsuDisplay_Update(&s);
+    }
+    if(scenario==50){s.control.vin=10.0f;PsuDisplay_Update(&s);}
+    if(scenario==51){s.menu.page=PSU_MENU_ROOT;PsuDisplay_Update(&s);}
+    preview_bytes=0;
+    if(scenario==47){s.control.current=0;s.control.vout=12.31f;/* isolate voltage cell */}
+    if(scenario==48)s.modes.solder.command=.41f;
+    if(scenario==49)s.modes.solder.temperature=299;
+    if(scenario==50)s.control.vin=9.9f;
+    if(scenario==51)s.menu.selected=1;
+    PsuDisplay_Update(&s);
+  }
+  if(scenario>=52){
+    s.control.settings.solder_current=3;s.control.current=1.5f;s.modes.solder.command=.4f;PsuDisplay_Update(&s);
+    preview_bytes=0;
+    if(scenario==53)s.control.current=3.4f;
+    if(scenario==54)s.control.current=0;
+    if(scenario==55)s.control.settings.solder_current=6;
+    if(scenario==56)PsuSolder_SetTarget(&s.modes,350);
+    if(scenario==57){s.modes.solder_request=0;s.control.current=0;}
+    if(scenario==58){s.control.fault=PSU_F_OVP;s.control.current=0;}
+    if(scenario==59)s.modes.run_seconds++;
+    PsuDisplay_Update(&s);
   }
   /* The underline must move when only the digit changes. */
   if(scenario==11) {s.edit_digit=2;PsuDisplay_Update(&s);}

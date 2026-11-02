@@ -65,8 +65,8 @@ def trace_gate(uc,access,address,size,value,user):
     elif address==timer and value&9==9 and not(register(timer)&1):
         assert mode==0x7040 and register(timer+0x34)==0,'Discharge must hold buck IN low and use boost PWM2'
         assert register(timer+0x30)==0 and register(timer+0x28)==0,'OPM must have RCR=0 and PSC=0'
-        assert register(timer+0x2c)==7199 and not(value&2),'Unexpected OPM period or disabled update'
-        assert 144<=7200-register(timer+0x38)<=1440,'Shot width outside 2..20 us'
+        assert register(timer+0x2c)==2879 and not(value&2),'Unexpected OPM period or disabled update'
+        assert 144<=2880-register(timer+0x38)<=1440,'Shot width outside 2..20 us'
         assert gate['sd'] and register(timer+0x44)&0x8000,'Shot not driving IN pins'
         assert gate['loaded']==(0,register(timer+0x38)),'OPM started before both compares latched'
         stamp=register(symbols['now'])

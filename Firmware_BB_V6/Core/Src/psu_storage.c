@@ -5,12 +5,16 @@
 #define OLD_MAGIC 0x42503631u
 #define V2_MAGIC 0x42503632u
 #define V3_MAGIC 0x42503633u
-#define MAGIC 0x42503634u
+#define V4_MAGIC 0x42503634u
+#define V5_MAGIC 0x42503635u
+#define MAGIC 0x42503636u
 typedef struct { uint32_t sequence;PsuPreset presets[3];uint32_t crc,commit; } Legacy;
 typedef struct { uint32_t sequence;PsuPreset presets[3];uint32_t version;float settings[36];uint32_t crc,commit; } RecordV2;
 typedef char V2PrefixMatches[(offsetof(PsuSettings,ramp_v_per_s)==36u*sizeof(float))?1:-1];
 typedef struct { uint32_t sequence;PsuPreset presets[3];uint32_t version;float settings[37];uint32_t crc,commit; } RecordV3;
 typedef char V3PrefixMatches[(offsetof(PsuSettings,solder_voltage)==37u*sizeof(float))?1:-1];
+typedef struct { uint32_t sequence;PsuPreset presets[3];uint32_t version;float settings[39];uint32_t crc,commit; } RecordV4;
+typedef char V4PrefixMatches[(offsetof(PsuSettings,solder_kp)==39u*sizeof(float))?1:-1];
 typedef struct { uint32_t sequence;PsuPreset presets[3];uint32_t version;PsuSettings settings;uint32_t crc,commit; } Record;
 static uint32_t crc32(const void *data,uint32_t n) {
  const uint8_t *p=data;uint32_t c=0xFFFFFFFFu,b;
@@ -34,8 +38,15 @@ static int valid(const Record *r) {
   PsuSettings expanded;PsuSettings_Defaults(&expanded);memcpy(&expanded,v3->settings,sizeof(v3->settings));
   if(!PsuSettings_Validate(&expanded) && presets_valid(v3->presets,expanded.vout_max,expanded.i_max))return 3;
  }
- return r->commit==MAGIC && r->version==4 && r->crc==crc32(r,offsetof(Record,crc)) &&
-  !PsuSettings_Validate(&r->settings) && presets_valid(r->presets,r->settings.vout_max,r->settings.i_max) ? 4 : 0;
+ const RecordV4 *v4=(const RecordV4 *)r;
+ if(v4->commit==V4_MAGIC && v4->version==4 && v4->crc==crc32(v4,offsetof(RecordV4,crc))){
+  PsuSettings expanded;PsuSettings_Defaults(&expanded);memcpy(&expanded,v4->settings,sizeof(v4->settings));
+  if(!PsuSettings_Validate(&expanded) && presets_valid(v4->presets,expanded.vout_max,expanded.i_max))return 4;
+ }
+ if(r->crc!=crc32(r,offsetof(Record,crc)) || PsuSettings_Validate(&r->settings) ||
+    !presets_valid(r->presets,r->settings.vout_max,r->settings.i_max))return 0;
+ if(r->commit==V5_MAGIC && r->version==5)return 5;
+ return r->commit==MAGIC && r->version==6?6:0;
 }
 static const Record *latest(void) {
  const Record *a=(const Record *)SLOT0,*b=(const Record *)SLOT1;
@@ -47,12 +58,17 @@ int PsuStorage_LoadAll(PsuPreset p[3],PsuSettings *settings) {
  const Record *r=latest();if(!r)return 0;
  memcpy(p,r->presets,sizeof(r->presets));
  int version=valid(r);
- if(version==4)*settings=r->settings;
+ if(version>=5)*settings=r->settings;
  else {
   PsuSettings_Defaults(settings);
+  if(version==4)memcpy(settings,((const RecordV4 *)r)->settings,sizeof(((const RecordV4 *)r)->settings));
   if(version==2)memcpy(settings,((const RecordV2 *)r)->settings,sizeof(((const RecordV2 *)r)->settings));
   if(version==3)memcpy(settings,((const RecordV3 *)r)->settings,sizeof(((const RecordV3 *)r)->settings));
  }
+ /* The board now carries a 50k NTC. Keep the divider resistor and Beta,
+    and retain any explicitly calibrated non-default R25 from older images.
+    No automatic Flash write at boot: explicit SAVE commits revision 6. */
+ if(version<6 && settings->ntc_r25==10000.0f)settings->ntc_r25=PSU_NTC_R25_OHM;
  return 1;
 }
 int PsuStorage_SaveAll(const PsuPreset p[3],const PsuSettings *settings) {
@@ -61,7 +77,7 @@ int PsuStorage_SaveAll(const PsuPreset p[3],const PsuSettings *settings) {
  if(PsuSettings_Validate(settings) || !presets_valid(p,settings->vout_max,settings->i_max))return 0;
  at=old==(const Record *)SLOT0?SLOT1:SLOT0;
  memset(&next,0xFF,sizeof(next));next.sequence=old?old->sequence+1:1;
- memcpy(next.presets,p,sizeof(next.presets));next.version=4;next.settings=*settings;
+ memcpy(next.presets,p,sizeof(next.presets));next.version=6;next.settings=*settings;
  next.crc=crc32(&next,offsetof(Record,crc));next.commit=MAGIC;
  if(HAL_FLASH_Unlock()!=HAL_OK)return 0;
  erase.TypeErase=FLASH_TYPEERASE_PAGES;erase.PageAddress=at;erase.NbPages=1;

@@ -1,0 +1,9 @@
+{
+  "Core/Inc/analog_monitor.h": "a6cb8dc104d1c6cf53960e4ff4b219910e8c960c367cd08b1e551ac61be0d7b5",
+  "Core/Src/power_stage.c": "2b5d2b2ead575e42fa9de1a4f8a22a5a64ba2b78b0b46ffc850b01d4ac703940",
+  "tests/refresh_fixture.c": "cd394aa6c5d6b1afc82661d5c38f87610a2b329f64a453b6edd737dd6e5fb4d6",
+  "MDK-ARM/Firmware_BB_V6/Firmware_BB_V6.hex": "845dbc8a7825b28d562937cd612fff8344f15c6ab3069f4c745296e75bc4ef8b",
+  "MDK-ARM/Firmware_BB_V6/Firmware_BB_V6.axf": "30ea30704a12c0b089557c6b772d1ca085d2a5f344bb7d7459edc708cc9f4768",
+  "MDK-ARM/Firmware_BB_V6/Firmware_BB_V6.map": "fed2d5a764923fc33cb4bc840b6ff1739b4ef72b26edd4e4134da12501c2aaa1",
+  "PAIRED_PWM_REPORT.md": "ee31faecd17ed95b77656d26b2fe8c0bbb3cc400fe731717519f6f5a6f872923"
+}

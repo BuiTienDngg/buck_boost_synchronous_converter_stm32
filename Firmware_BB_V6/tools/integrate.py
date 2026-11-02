@@ -2,6 +2,8 @@
 from pathlib import Path
 import re
 ROOT = Path(__file__).resolve().parents[1]
+if "BBV6.41-PB9-TIM4CH4" in (ROOT/"Core/Src/psu_app.c").read_text():
+    raise SystemExit("PB9/TIM4 migration: legacy PA6 integration is disabled; preserve current generated files.")
 def edit(path, function):
     p = ROOT / path
     s = p.read_text(encoding='utf-8-sig')
@@ -20,7 +22,7 @@ def main(s):
     for(;;){__WFI();}
   }''')
     s = user(s, '2', '  if(PSU_PA6_PWM_PIN_TEST) PsuApp_PinTestInit();\n  else PsuApp_Init();')
-    s = user(s, 'SPI1_Init 2', '  /* Transmit Only Master: MOSI output, no receive path. */\n  SPI_1LINE_TX(&hspi1);')
+    s = user(s, 'SPI1_Init 2', '')
     s = user(s, '3', '    if(PSU_PA6_PWM_PIN_TEST) { __WFI(); }\n    else PsuApp_Poll();\n  }')
     s = user(s, 'Error_Handler_Debug', '  PsuApp_EmergencyOff();\n  __disable_irq();\n  while (1) { }')
     s = user(s, 'ADC2_Init 2', '''  /* PA3 tip temperature: injected conversion, regular PA0 remains NTC.
@@ -175,7 +177,7 @@ def ioc(s):
       'TIM2.EncoderMode':'TIM_ENCODERMODE_TI12','TIM2.IC1Filter':'8','TIM2.IC2Filter':'8',
       'TIM3.Prescaler':'0','TIM3.Period':'7199','TIM3.AutoReloadPreload':'TIM_AUTORELOAD_PRELOAD_ENABLE',
       'TIM4.Prescaler':'71','TIM4.Period':'999',
-      'SPI1.Direction':'SPI_DIRECTION_1LINE',
+      'SPI1.Direction':'SPI_DIRECTION_2LINES',
       'PA5.Mode':'Half_Duplex_Master','PA7.Mode':'Half_Duplex_Master',
       'PA6.Mode':'PWM Generation1 CH1','PA6.Signal':'S_TIM3_CH1',
       'TIM3.Channel-PWM Generation1 CH1':'TIM_CHANNEL_1','TIM3.OCPolarity_1':'TIM_OCPOLARITY_HIGH','TIM3.Pulse-PWM Generation1 CH1':'0',

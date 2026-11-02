@@ -75,8 +75,8 @@ void Error_Handler(void);
 /* USER CODE BEGIN Private defines */
 #define SD_Pin GPIO_PIN_10
 #define SD_GPIO_Port GPIOA
-#define HEATER_Pin GPIO_PIN_6
-#define HEATER_GPIO_Port GPIOA
+#define HEATER_Pin GPIO_PIN_9
+#define HEATER_GPIO_Port GPIOB
   /* USER CODE END Private defines */
 
 #ifdef __cplusplus

@@ -40,3 +40,9 @@ PSU_FIELD(ramp_v_per_s, 1000, 0.1f, 100.0f, PSU_RAMP_V_PER_S)
 /* V4 append: common solder supply profile, independent of LAB setpoints. */
 PSU_FIELD(solder_voltage, 1000, PSU_VOUT_MIN_V, PSU_VOUT_MAX_V, 18.0f)
 PSU_FIELD(solder_current, 1000, 0.05f, PSU_CURRENT_MAX_A, 6.0f)
+
+/* V5 append: thermal PID (duty units) and carrier duty limit (%). */
+PSU_FIELD(solder_kp, 1000000, 0.0f, 1.0f, 0.01f)
+PSU_FIELD(solder_ki, 1000000, 0.0f, 1.0f, 0.001f)
+PSU_FIELD(solder_kd, 1000000, 0.0f, 1.0f, 0.002f)
+PSU_FIELD(solder_duty_max, 1000, 0.0f, 95.0f, 80.0f)

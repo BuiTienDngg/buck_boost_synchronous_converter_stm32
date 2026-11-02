@@ -392,21 +392,7 @@ void HAL_TIM_MspPostInit(TIM_HandleTypeDef* htim)
     /* USER CODE END TIM3_MspPostInit 0 */
 
     __HAL_RCC_GPIOA_CLK_ENABLE();
-    /**TIM3 GPIO Configuration
-    PA6     ------> TIM3_CH1
-    */
-    HAL_GPIO_WritePin(GPIOA,GPIO_PIN_6,GPIO_PIN_RESET);
-    GPIO_InitStruct.Pin = GPIO_PIN_6;
-    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
     /* USER CODE BEGIN TIM3_MspPostInit 1 */
-  /* Keep active-HIGH heater LOW until the app authorizes PWM. */
-    HAL_GPIO_WritePin(GPIOA,GPIO_PIN_6,GPIO_PIN_RESET);
-    GPIO_InitStruct.Pin=GPIO_PIN_6;GPIO_InitStruct.Mode=GPIO_MODE_OUTPUT_PP;
-    GPIO_InitStruct.Speed=GPIO_SPEED_FREQ_LOW;HAL_GPIO_Init(GPIOA,&GPIO_InitStruct);
-    MODIFY_REG(AFIO->MAPR,AFIO_MAPR_TIM3_REMAP|AFIO_MAPR_SWJ_CFG,AFIO_MAPR_SWJ_CFG_JTAGDISABLE);
   /* USER CODE END TIM3_MspPostInit 1 */
   }
 

@@ -91,7 +91,8 @@ for key,value in dict(vin_max=40.,vout_max=36.,i_max=8.,i_peak=10.,power_max=60.
 v2_data=struct.pack('<I',29)+A+struct.pack('<I',2)+pack_settings(old_values)
 v2=v2_data+struct.pack('<II',zlib.crc32(v2_data),0x42503632)
 v2+=b'\xff'*(2048-len(v2))
-expanded=pack_settings(old_values+[10.,18.,6.])
+thermal_defaults=[f['default'] for f in schema['fields'][39:]]
+expanded=pack_settings(old_values+[10.,18.,6.]+thermal_defaults)
 loaded=run('PsuStorage_LoadAll',bytes(12),v2)
 check(loaded[0]==1 and loaded[1]==A and loaded[4]==expanded)
 migrated=run('PsuStorage_SaveAll',B,v2,settings=custom)
@@ -127,5 +128,64 @@ high_saved=run('PsuStorage_SaveAll',high_presets,old_v3,settings=factory)
 check(high_saved[0]==1)
 high_loaded=run('PsuStorage_LoadAll',bytes(12),high_saved[2])
 check(high_loaded[0]==1 and high_loaded[1]==high_presets and high_loaded[4]==factory)
+# Existing V4 pages retain all 39 settings while initializing the thermal PID.
+v4_values=[f['default'] for f in schema['fields'][:39]]
+v4_values[0]=0.027
+v4_data=struct.pack('<I',52)+A+struct.pack('<I',4)+pack_settings(v4_values)
+v4_page=v4_data+struct.pack('<II',zlib.crc32(v4_data),0x42503634)
+v4_page+=b'\xff'*(2048-len(v4_page))
+restored=run('PsuStorage_LoadAll',bytes(12),v4_page)
+check(restored[0]==1 and restored[4]==pack_settings(v4_values+thermal_defaults))
+v5_settings=values.copy()
+for key,value in [('solder_kp',0.02),('solder_ki',0.003),('solder_kd',0.004),('solder_duty_max',42.)]:v5_settings[[f['key'] for f in schema['fields']].index(key)]=value
+v5_saved=run('PsuStorage_SaveAll',B,v4_page,settings=pack_settings(v5_settings))
+check(v5_saved[0]==1)
+restored=run('PsuStorage_LoadAll',bytes(12),v5_saved[2])
+check(restored[0]==1 and restored[4]==pack_settings(v5_settings))
+for cut in range(1,v5_saved[3]+1):
+    interrupted=run('PsuStorage_SaveAll',B,v4_page,cut,settings=pack_settings(v5_settings))
+    restored=run('PsuStorage_LoadAll',bytes(12),interrupted[2])
+    check(restored[0]==1 and restored[4]==pack_settings(v4_values+thermal_defaults))
+# OVP values must round-trip exactly; rejected values must not erase Flash.
+keys=[f['key'] for f in schema['fields']]
+values=list(struct.unpack('<'+str(len(keys))+'f',factory))
+values[keys.index('ovp_percent')]=8.0;values[keys.index('ovp_offset')]=0.8
+ovp_settings=pack_settings(values)
+ovp_saved=run('PsuStorage_SaveAll',A,settings=ovp_settings)
+check(ovp_saved[0]==1)
+ovp_loaded=run('PsuStorage_LoadAll',bytes(12),ovp_saved[2])
+check(ovp_loaded[0]==1 and ovp_loaded[4]==ovp_settings)
+for key,value in [('ovp_percent',80.0),('ovp_offset',10.0)]:
+    bad=values.copy();bad[keys.index(key)]=value
+    rejected=run('PsuStorage_SaveAll',A,ovp_saved[2],settings=pack_settings(bad))
+    check(rejected[0]==0 and rejected[2]==ovp_saved[2])
+# Genuine V5 record with old 10k default migrates only R25, not pull/Beta/PID.
+keys=[f['key'] for f in schema['fields']]
+legacy50=[f['default'] for f in schema['fields']]
+legacy50[keys.index('ntc_r25')]=10000.
+legacy50[keys.index('ntc_pull')]=12000.
+legacy50[keys.index('ntc_beta')]=3435.
+legacy50[keys.index('cv_kp')]=.031
+legacy50[keys.index('solder_kp')]=.017
+def v5_page(values):
+    data=struct.pack('<I',70)+A+struct.pack('<I',5)+pack_settings(values)
+    record=data+struct.pack('<II',zlib.crc32(data),0x42503635)
+    return record+b'\xff'*(2048-len(record))
+old_page=v5_page(legacy50)
+expected=legacy50.copy();expected[keys.index('ntc_r25')]=50000.
+upgraded=run('PsuStorage_LoadAll',bytes(12),old_page)
+check(upgraded[0]==1 and upgraded[1]==A and upgraded[4]==pack_settings(expected))
+committed=run('PsuStorage_SaveAll',A,old_page,settings=upgraded[4])
+check(committed[0]==1)
+check(run('PsuStorage_LoadAll',bytes(12),committed[2])[4]==pack_settings(expected))
+for cut in range(1,committed[3]+1):
+    damaged=run('PsuStorage_SaveAll',A,old_page,cut,settings=upgraded[4])
+    check(run('PsuStorage_LoadAll',bytes(12),damaged[2])[4]==pack_settings(expected))
+# Custom old R25 is retained; explicit 10k in revision 6 also remains editable.
+legacy50[keys.index('ntc_r25')]=47000.
+check(run('PsuStorage_LoadAll',bytes(12),v5_page(legacy50))[4]==pack_settings(legacy50))
+legacy50[keys.index('ntc_r25')]=10000.
+explicit=run('PsuStorage_SaveAll',A,settings=pack_settings(legacy50))
+check(run('PsuStorage_LoadAll',bytes(12),explicit[2])[4]==pack_settings(legacy50))
 print(f'Flash journal: {passed}/{passed} checks passed (power loss at every erase/program boundary).')
 (BUILD/'storage_results.json').write_text(json.dumps({'passed':passed,'total':passed},indent=2))

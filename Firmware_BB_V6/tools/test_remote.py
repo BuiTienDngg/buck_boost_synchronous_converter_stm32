@@ -59,12 +59,12 @@ request('SET',5000,1000);r=request('ON');check(r['enabled']==1)
 tick(110)
 t=[m for m in messages if m.get('type')=='telemetry'][-1]
 check(0<t['ref_mV']<5000 and t['ramp_active']==1 and t['state']==1 and t['ramp_mV_s']==10000)
-call('remote_fixture_sense',268,0,960,2048);tick(610)
+call('remote_fixture_sense',268,0,960,3413);tick(610)
 t=[m for m in messages if m.get('type')=='telemetry'][-1]
 check(t['ref_mV']==5000 and t['state'] in (2,3) and t['softstart'] is True)
 check(t['vout_div_pm']==23000 and t['adc']==dict(vo=268,io=0,vi=960))
-check(t['pwm']['arr']==7199 and t['pwm']['psc']==0)
-check(t['pwm']['ccr1']>0 and t['pwm']['ccr2']==6480)
+check(t['pwm']['arr']==2879 and t['pwm']['psc']==0)
+check(t['pwm']['ccr1']>0 and t['pwm']['ccr2']==2592)
 check(t['pwm']['ccmr1']&0x7070==0x6060 and t['pwm']['bdtr']&0x8000)
 r=request('CFG',0,settings=defaults(),expect=False);check(r['error']=='output_off_required' and r['rev']==0)
 request('SAVE',expect=False);request('PRESET',0,6000,1500,expect=False)
@@ -91,7 +91,7 @@ feed(b'@1999 CFG 2 i_max=2000 '+b'x'*1300+b'\n');tick(4)
 r=request('GET');check(r['settings']==defaults())
 check(framer.errors==0)
 # Runtime ramp is acknowledged, used by TIM3 and reflected in telemetry.
-call('remote_fixture_sense',0,0,960,2048);tick(160)
+call('remote_fixture_sense',0,0,960,3413);tick(160)
 ramp_cfg=defaults();ramp_cfg['ramp_v_per_s']=2500
 r=request('CFG',2,settings=ramp_cfg);check(r['settings']['ramp_v_per_s']==2500)
 tick(160);request('SET',5000,1000);request('ON');tick(100)
@@ -108,8 +108,9 @@ r=request('SET',59900,15000);check(r['set_mV']==59900 and r['set_mA']==15000 and
 r=request('SAVE');check(r['ok'])
 # SOLDER rail configuration uses CFG while OFF, not LAB SET, and cannot
 # reconfigure an active heater or a pending route even before DC-DC is ON.
-call('remote_fixture_sense',0,0,1295,2048);tick(160)
-call('remote_fixture_buttons',1<<8,1026)
+call('remote_fixture_sense',0,0,1295,3413);tick(160)
+call('remote_fixture_buttons',1<<13,1026);tick(60)
+# SOLDER now starts automatically; no extra short ON press here.
 r=request('CFG',r['rev'],settings=high,expect=False)
 check(r['error']=='output_off_required')
 request('OFF');tick(20)
@@ -118,8 +119,8 @@ r=request('CFG',r['rev'],settings=solder_cfg)
 check(r['settings']==solder_cfg and not r['enabled'])
 r=request('SAVE');check(r['settings']['solder_voltage']==7500 and r['settings']['solder_current']==1200)
 request('SET',8000,1300,expect=False)
-tick(160);call('remote_fixture_buttons',1<<9,60);tick(60)
-call('remote_fixture_sense',405,0,1295,2048);tick(1000)
+tick(160);call('remote_fixture_buttons',1<<13,60);tick(60)
+call('remote_fixture_sense',405,0,1295,3413);tick(1000)
 r=request('GET');check(r['enabled'] and r['set_mV']==7500 and r['set_mA']==1200)
 r=request('CFG',r['rev'],settings=high,expect=False)
 check(r['error']=='output_off_required' and r['settings']==solder_cfg)
@@ -132,19 +133,21 @@ for duration,target in [(99,200),(10001,200),(600,149),(600,251)]:
     r=request('HEAT',duration,target,expect=False);check(r['error']=='bench_range')
 tick(160);r=request('HEAT',600,200);check(r['op']=='HEAT')
 r=request('HEAT',600,200,expect=False);check(r['error']=='output_off_required')
-tick(650);r=request('GET');check(not r['enabled'] and not r['change'] and not r['fault'])
+tick(650);r=request('GET');check(not r['enabled'] and r['change'] and not r['fault'])
 feed(b'?');tick(110)
 t=[m for m in messages if m.get('type')=='telemetry'][-1]
 check(t['solder']['target_C']==300 and not t['solder']['heater'] and t['solder']['rises']>0)
 # Priority OFF cancels an already queued HEAT just as it cancels ON.
 identifier+=1;feed(command(identifier,'HEAT',600,200));tick(1);feed(b'!\n');tick(3)
-r=request('GET');check(not r['enabled'] and not r['change'])
+r=request('GET');check(not r['enabled'] and r['change'])
 # Thermal errors survive lease cleanup, so a failed run is not silently reset.
 tick(160);request('HEAT',600,200);call('remote_fixture_tip',4095);tick(10)
 feed(b'?');tick(110)
 t=[m for m in messages if m.get('type')=='telemetry'][-1]
-check(t['solder']['reason']==3 and not t['enabled'] and not t['change'])
+check(t['solder']['reason']==3 and not t['enabled'] and t['change'])
 request('HEAT',600,200,expect=False)
 request('OFF');call('remote_fixture_tip',1273);tick(160)
+check(all(k in t['solder'] for k in ['load_limit_pm','rail_recover','rail_events','zero_cause']))
 print(f'PC protocol -> actual Cortex-M3 app: {count}/{count} checks passed.')
 (BUILD/'remote_results.json').write_text(json.dumps({'passed':count,'total':count,'protocol':1,'max_tx_bytes':max(map(len,transmissions))},indent=2))
+

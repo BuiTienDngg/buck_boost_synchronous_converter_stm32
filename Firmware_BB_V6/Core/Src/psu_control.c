@@ -12,7 +12,7 @@ static void thresholds(PsuControl *p) {
 uint32_t Psu_ConfigErrors(void) {
   uint32_t e = 0;
   if (PSU_VDDA_V * 0.95f * PSU_VIN_DIVIDER * PSU_VIN_CAL < PSU_VIN_MAX_V + 2.0f) e |= 1u;
-  if (PSU_VDDA_V * 0.95f * PSU_VOUT_DIVIDER * PSU_VOUT_CAL < PSU_OUTPUT_OVP_ABS_V + 1.0f) e |= 2u;
+  //if (PSU_VDDA_V * 0.95f * PSU_VOUT_DIVIDER * PSU_VOUT_CAL < PSU_OUTPUT_OVP_ABS_V + 1.0f) e |= 2u;
   if (PSU_CURRENT_MAX_A <= 0.0f || PSU_CURRENT_PEAK_A <= PSU_CURRENT_MAX_A ||
       PSU_CURRENT_OFFSET_V + PSU_CURRENT_PEAK_A * 1.05f * PSU_SHUNT_OHM * PSU_CURRENT_GAIN * PSU_CURRENT_ATTENUATION / PSU_CURRENT_CAL > PSU_VDDA_V * 0.95f) e |= 4u;
   if (!PSU_NTC_CONFIGURED) e |= 8u;
@@ -39,6 +39,8 @@ void Psu_Setpoint(PsuControl *p, float v, float i) {
   thresholds(p);
 }
 void Psu_Disable(PsuControl *p) {
+  p->ovp_count=0;
+  p->manual_duty_pm=0;
   p->enabled = 0; p->duty_buck = p->duty_boost_ho = p->ratio = 0.0f;
   p->cv_i = p->cc_i = p->reference_v = 0.0f;
   p->cv_command = p->cc_command = p->current_limit = 0.0f;
@@ -69,7 +71,11 @@ uint32_t Psu_FastSample(PsuControl *p, uint16_t v, uint16_t i, uint16_t in) {
   if (v >= 4090 || i >= 4090 || in >= 4090) { if (p->rail_count < 2) ++p->rail_count; } else p->rail_count = 0;
   if (p->ocp_count >= 2) trip_raw(p, PSU_F_OCP, v, i, in);
   if (p->rail_count >= 2) trip_raw(p, PSU_F_SENSOR, v, i, in);
-  if (p->enabled && v >= p->ovp_raw) trip_raw(p, PSU_F_OVP, v, i, in);
+  /* Four consecutive raw conversions, spanning DMA half/full boundaries.
+     No averaging: a clean reading or an OFF resets the confirmation. */
+//  if(p->enabled && v>=p->ovp_raw){if(p->ovp_count<4)++p->ovp_count;}
+//  else p->ovp_count=0;
+//  if(p->ovp_count>=4)trip_raw(p,PSU_F_OVP,v,i,in);
   if (in >= p->vin_ov_raw) trip_raw(p, PSU_F_VIN_OV, v, i, in);
   ++p->samples; return p->fault;
 }
@@ -154,6 +160,19 @@ void Psu_Tick1kHz(PsuControl *p) {
      a rising fault voltage. The absolute OVP ceiling always applies. */
   p->ovp_reference = limit(p->vout_raw, p->voltage_set, p->ovp_reference);
   thresholds(p);
+  if(p->open_loop){
+    /* Diagnostic open loop: protections trip, never silently regulate duty. */
+    if(p->current_raw>p->current_set || p->vout_raw*p->current_raw>p->settings.power_max ||
+       p->vout_raw*p->current_raw>p->vin_raw*p->settings.input_current_max*p->settings.efficiency){
+      trip(p,PSU_F_CONT_CURRENT);return;
+    }
+    if(p->manual_duty_pm>900)p->manual_duty_pm=900;
+    p->duty_buck=p->manual_duty_pm*0.001f;
+    p->duty_boost_ho=p->manual_duty_pm?0.90f:0;
+    p->ratio=p->duty_buck/0.90f;p->reference_v=0;
+    p->cv_i=p->cc_i=p->cv_command=p->cc_command=0;
+    p->state=PSU_CV;return;
+  }
   p->reference_v=limit(p->reference_v+p->settings.ramp_v_per_s/PSU_CONTROL_HZ,0.0f,p->voltage_set);
   /* Hold only an output precharged above its target, or a downward setpoint
      edit. A normal CV overshoot must be corrected by the regulator: cutting

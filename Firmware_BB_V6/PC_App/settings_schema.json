@@ -310,7 +310,7 @@
       "scale": 1,
       "minimum": 1000.0,
       "maximum": 1000000.0,
-      "default": 10000.0,
+      "default": 50000.0,
       "group": "Nhiệt độ và NTC",
       "label": "NTC tại 25 °C",
       "unit": "Ω",
@@ -447,6 +447,50 @@
       "label": "Giới hạn dòng tay hàn",
       "unit": "A",
       "decimals": 2
+    },
+    {
+      "key": "solder_kp",
+      "scale": 1000000,
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "default": 0.01,
+      "group": "PID tay han",
+      "label": "Kp nhiet",
+      "unit": "duty/C",
+      "decimals": 6
+    },
+    {
+      "key": "solder_ki",
+      "scale": 1000000,
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "default": 0.001,
+      "group": "PID tay han",
+      "label": "Ki nhiet",
+      "unit": "duty/C/s",
+      "decimals": 6
+    },
+    {
+      "key": "solder_kd",
+      "scale": 1000000,
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "default": 0.002,
+      "group": "PID tay han",
+      "label": "Kd nhiet",
+      "unit": "duty*s/C",
+      "decimals": 6
+    },
+    {
+      "key": "solder_duty_max",
+      "scale": 1000,
+      "minimum": 0.0,
+      "maximum": 95.0,
+      "default": 80.0,
+      "group": "PID tay han",
+      "label": "Duty toi da",
+      "unit": "%",
+      "decimals": 1
     }
   ]
 }

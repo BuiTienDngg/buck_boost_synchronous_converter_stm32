@@ -1,16 +1,30 @@
 #include "psu_modes.h"
 #include <string.h>
 #include <math.h>
+static uint32_t solder_status(const PsuControl *p);
 static void solder_stop(PsuModes *m,PsuControl *p,uint8_t reason){
+  if(reason && !m->solder.stop_ms){
+    m->solder.stop_heat_cmd=m->solder.slew_duty;
+    m->solder.stop_flags=solder_status(p)|(!p->enabled?512u:0u);
+    m->solder.stop_fault=p->fault;m->solder.stop_block=p->start_block;
+    m->solder.stop_ms=m->solder.health_ms;
+  }
+  m->solder.zero_cause=reason?7u:1u;m->solder.rail_recover=0;
+  m->solder.target_hold_ms=0;
+  m->solder.slew_duty=0; /* Preserve last PID decision for post-fault diagnosis. */
   Psu_Disable(p);m->solder_request=m->solder_on=0;m->solder.duty=m->solder.command=0;
   m->solder.ramp_ms=m->solder.ramp_limit_pm=m->solder.on_ms=0;
   m->solder.cycle_ready=0;
   m->solder.phase=reason?PSU_SOL_ERROR:PSU_SOL_OFF;m->solder.error=reason;
   m->solder.integral=m->solder.derivative=0;m->solder.pid_ready=0;m->solder.watch_ms=0;
 }
-static int solder_healthy(const PsuControl *p){
-  return !p->fault && !p->config_errors && p->initialized && p->adc_age_ms<3 && p->temp_valid && p->temp_age_ms<200 &&
-    p->temp_c<p->settings.temp_trip && p->vin_raw>=p->settings.vin_min && p->vin_raw<p->settings.vin_max;
+/* Diagnostic bits: fault/config/uninitialized/ADC/temp invalid/temp stale/
+   overtemperature/VIN low/VIN high/power unexpectedly OFF. */
+static uint32_t solder_status(const PsuControl *p){
+  return (p->fault?1u:0u)|(p->config_errors?2u:0u)|(!p->initialized?4u:0u)|
+    (p->adc_age_ms>=3?8u:0u)|(!p->temp_valid?16u:0u)|(p->temp_age_ms>=200?32u:0u)|
+    (p->temp_c>=p->settings.temp_trip?64u:0u)|(p->vin_raw<p->settings.vin_min?128u:0u)|
+    (p->vin_raw>=p->settings.vin_max?256u:0u);
 }
 /* Temporary user calibration, shared by both tip selections:
    ADC 1193 = 29 C, slope 0.5 C per ADC count. */
@@ -24,8 +38,13 @@ void PsuSolder_SetTarget(PsuModes *m,int32_t degrees){
 static void solder_begin(PsuModes *m,uint32_t now){
   PsuSolder *s=&m->solder;
   m->discharge_inhibit=1;m->solder_request=1;m->solder_on=0;
+  s->health_now=s->health_seen=s->stop_flags=s->stop_fault=s->stop_block=s->stop_ms=0;
+  s->pid_demand=s->d_term=s->slew_duty=s->stop_heat_cmd=0;s->slew_limited=0;
   s->phase=PSU_SOL_ROUTE;s->error=s->valid=s->count=0;s->sum=0;s->trip_adc=0;
   s->started_ms=s->frame_ms=s->last_sample_ms=now;s->duty=s->command=s->integral=s->derivative=0;
+  s->load_limit_pm=PSU_SOLDER_HARD_MAX_PM;s->load_good_ms=s->rail_ready_ms=0;
+  s->rail_events=0;s->rail_recover=0;s->zero_cause=2;
+  s->target_hold_ms=0;s->target_announced=0;
   s->watch_ms=0;s->sleeping=s->stand_count=s->pid_ready=0;s->active_target=s->target;s->hot_ms=0;
   s->route_ms=now;s->heat_started_ms=now;s->ramp_ms=s->ramp_limit_pm=0;
   s->sample_ms=s->last_heat_ms=now;s->on_ms=s->position=0;s->cycle_ready=0;
@@ -45,33 +64,71 @@ void PsuSolder_Sample(PsuModes *m,uint16_t raw,uint32_t now){
   (void)now;
   if(s->count<64){s->sum+=raw;++s->count;}
 }
-static float solder_fraction(const PsuSolder *s){
-  float u=PSU_SOLDER_KP*(s->active_target-s->temperature);
-  return u<0?0:u>PSU_SOLDER_MAX_DUTY?PSU_SOLDER_MAX_DUTY:u;
+static float solder_fraction(const PsuSolder *s,const PsuSettings *cfg){
+  float maximum=cfg->solder_duty_max/100.0f;
+  if(maximum>PSU_SOLDER_HARD_MAX_PM/1000.0f)maximum=PSU_SOLDER_HARD_MAX_PM/1000.0f;
+  float u=cfg->solder_kp*(s->active_target-s->temperature);
+  return u<0?0:u>maximum?maximum:u;
 }
 /* Exactly one thermal PID update per 50 ms frame, after the quiet mean.
    D acts on measured temperature, avoiding a target-change derivative kick.
    Conditional integration prevents windup at either duty rail. */
-static float solder_pid(PsuSolder *s){
+static float solder_pid(PsuSolder *s,const PsuSettings *cfg){
   const float dt=PSU_SOLDER_FRAME_MS*0.001f;
   float error=s->active_target-s->temperature;
-  if(!s->pid_ready){s->derivative=0;s->pid_ready=1;}
+  float maximum=cfg->solder_duty_max/100.0f;
+  if(maximum>PSU_SOLDER_HARD_MAX_PM/1000.0f)maximum=PSU_SOLDER_HARD_MAX_PM/1000.0f;
+  float ceiling=s->ramp_limit_pm*0.001f; /* Includes supply backoff even without startup ramp. */
+  if(ceiling>maximum)ceiling=maximum;
+  if(!s->pid_ready){s->derivative=s->d_term=0;s->pid_ready=1;}
   else{
     s->derivative+=0.25f*((s->temperature-s->previous_temperature)/dt-s->derivative);
-    float u=PSU_SOLDER_KP*error+s->integral-PSU_SOLDER_KD*s->derivative;
-    if((error>0 && u<PSU_SOLDER_MAX_DUTY) || (error<0 && u>0))s->integral+=PSU_SOLDER_KI*dt*error;
+    s->d_term=cfg->solder_kd*s->derivative;
+    if(s->d_term>PSU_SOLDER_D_TERM_MAX)s->d_term=PSU_SOLDER_D_TERM_MAX;
+    if(s->d_term<-PSU_SOLDER_D_TERM_MAX)s->d_term=-PSU_SOLDER_D_TERM_MAX;
+    float u=cfg->solder_kp*error+s->integral-s->d_term;
+    if((error>0 && u<ceiling) || (error<0 && u>0))s->integral+=cfg->solder_ki*dt*error;
     if(s->integral<0)s->integral=0;
-    if(s->integral>1)s->integral=1;
+    if(s->integral>ceiling)s->integral=ceiling;
   }
   s->previous_temperature=s->temperature;
-  float u=PSU_SOLDER_KP*error+s->integral-PSU_SOLDER_KD*s->derivative;
-  return u<0?0:u>PSU_SOLDER_MAX_DUTY?PSU_SOLDER_MAX_DUTY:u;
+  float u=cfg->solder_kp*error+s->integral-s->d_term;
+  return u<0?0:u>ceiling?ceiling:u;
+}
+/* Called after temperature publication and again on a holder transition.
+   A sleep/wake transition resets PID even if both configured targets match. */
+static void solder_target(PsuSolder *s,const PsuSettings *cfg,uint8_t force){
+    uint16_t target=s->sleeping?s->sleep_target:s->target;
+    if(force || target!=s->active_target){
+      s->target_hold_ms=0;s->target_announced=0;
+      s->active_target=target;s->watch_ms=0;s->baseline=s->temperature;
+      s->integral=s->derivative=0;s->pid_ready=0;
+      s->slew_duty=0;s->slew_limited=0; /* New target bypasses old duty history. */
+      /* A lower target may shorten this interval. Never extend/restart ON
+         from an old reading after changing a target or leaving the stand. */
+      float reduced=solder_fraction(s,cfg);
+      if(reduced<s->command){s->slew_duty=reduced;s->command=reduced;s->on_ms=reduced>0?PSU_SOLDER_HEAT_MAX_MS:0;}
+    }
 }
 static void solder_tick(PsuModes *m,PsuControl *p,uint32_t now){
   PsuSolder *s=&m->solder;
+  s->health_ms=now;
   float voltage=p->settings.solder_voltage;
   float current=p->settings.solder_current;
   uint8_t was_heating=s->duty>0;
+  s->zero_cause=s->phase==PSU_SOL_RUN?3u:2u;
+  /* Restore lost supply headroom only after 1 s of actual loaded operation
+     at >=95% voltage without current limiting, not while the heater is OFF. */
+  uint16_t configured=(uint16_t)(p->settings.solder_duty_max*10.0f);
+  if(configured>PSU_SOLDER_HARD_MAX_PM)configured=PSU_SOLDER_HARD_MAX_PM;
+  if(s->load_limit_pm>configured)s->load_limit_pm=configured;
+  if(was_heating && !s->rail_recover){
+    if(p->vout_raw>=voltage*.95f && p->state!=PSU_CC && s->load_limit_pm<configured){
+      if(++s->load_good_ms>=1000){
+        unsigned next=s->load_limit_pm+10u;s->load_limit_pm=next>configured?configured:(uint16_t)next;s->load_good_ms=0;
+      }
+    }else s->load_good_ms=0;
+  }
   if(was_heating){
     s->last_heat_ms=now;
     if(s->temperature<s->active_target-50 && s->command>0.5f && s->watch_ms<60000)++s->watch_ms;
@@ -95,20 +152,17 @@ static void solder_tick(PsuModes *m,PsuControl *p,uint32_t now){
 #endif
     }
     s->sum=0;s->count=0;
-    if(!s->stand){s->stand_count=0;s->sleeping=0;s->stand_ms=now;}
-    else if(s->stand_count<PSU_SOLDER_STAND_SAMPLES){if(++s->stand_count==PSU_SOLDER_STAND_SAMPLES){s->sleeping=1;s->stand_ms=now;}}
-    uint16_t target=s->sleeping?s->sleep_target:s->target;
-    if(target!=s->active_target){
-      s->active_target=target;s->watch_ms=0;s->baseline=s->temperature;
-      s->integral=s->derivative=0;s->pid_ready=0;
-      /* A lower target may shorten this interval. Never extend/restart ON
-         from an old reading after changing a target or leaving the stand. */
-      float reduced=solder_fraction(s);
-      if(reduced<s->command){s->command=reduced;s->on_ms=reduced>0?PSU_SOLDER_HEAT_MAX_MS:0;}
-    }
+    solder_target(s,&p->settings,0);
   }
-  if(!m->solder_request){s->phase=s->error?PSU_SOL_ERROR:PSU_SOL_OFF;return;}
-  if(!solder_healthy(p)){solder_stop(m,p,PSU_SOL_HEALTH);return;}
+  if(!m->solder_request){s->zero_cause=s->error?7u:1u;s->phase=s->error?PSU_SOL_ERROR:PSU_SOL_OFF;return;}
+  /* No aggregate HEALTH predicate: VIN transient policy belongs to source
+     protection (including its existing 5 ms undervoltage confirmation). */
+  s->health_now=solder_status(p);s->health_seen|=s->health_now;
+  if(s->health_now&(8u|32u))p->fault|=PSU_F_ADC;
+  if(s->health_now&16u)p->fault|=PSU_F_SENSOR;
+  if(s->health_now&64u)p->fault|=PSU_F_OTP;
+  if(p->fault){solder_stop(m,p,PSU_SOL_HEALTH);return;}
+  if(s->health_now&(2u|4u)){solder_stop(m,p,PSU_SOL_CONFIG);return;}
   /* Only a scheduled, continuously renewed ON interval may retain a
      temperature older than 200 ms. Once OFF, quiet ADC must resume. */
   if(!was_heating && now-s->last_heat_ms>=200 &&
@@ -134,7 +188,9 @@ static void solder_tick(PsuModes *m,PsuControl *p,uint32_t now){
     if(!p->enabled){solder_stop(m,p,PSU_SOL_HEALTH);return;}
     if(now-s->started_ms>=30000){solder_stop(m,p,PSU_SOL_RAIL_TIMEOUT);return;}
     if(p->vout_raw>=voltage*0.95f && p->vout_raw<=voltage+0.5f && p->reference_v>=voltage-0.1f && !p->precharge_hold){
-      if(++s->rail_ms>=100){
+      /* Keep PB9 fully OFF while BB stabilizes. A rail dip resets this
+         consecutive-ready timer; no thermal duty ramp is reintroduced. */
+      if(++s->rail_ms>=PSU_SOLDER_RAIL_SETTLE_MS){
         s->phase=PSU_SOL_RUN;s->frame_ms=s->heat_started_ms=now;s->position=0;
         s->ramp_ms=s->ramp_limit_pm=s->on_ms=0;s->command=0;s->cycle_ready=0;
         s->baseline=s->temperature;s->watch_ms=0;s->last_heat_ms=now;
@@ -143,13 +199,33 @@ static void solder_tick(PsuModes *m,PsuControl *p,uint32_t now){
   }
   if(s->phase!=PSU_SOL_RUN)return;
   if(!p->enabled){solder_stop(m,p,PSU_SOL_HEALTH);return;}
-  if(p->vout_raw<voltage*0.7f){
+  if(!s->rail_recover && p->vout_raw<voltage*.7f){
+    ++s->rail_events;s->load_good_ms=0;
+    /* Keep the original immediate low-rail cut, but remember a reduced
+       load ceiling instead of retrying the same 80% after every recovery. */
+    unsigned floor=configured<50u?configured:50u;
+    if(s->load_limit_pm<=floor){solder_stop(m,p,PSU_SOL_RAIL_TIMEOUT);return;}
+    unsigned basis=s->load_limit_pm,applied=(unsigned)(s->slew_duty*1000.0f+0.5f);
+    if(applied && applied<basis)basis=applied;
+    unsigned reduced=basis/2u;s->load_limit_pm=reduced<floor?(uint16_t)floor:(uint16_t)reduced;
+    s->rail_recover=1;s->rail_ms=s->rail_ready_ms=0;
+    s->command=s->slew_duty=s->pid_demand=s->d_term=0;
+    s->integral=s->derivative=0;s->pid_ready=0;s->slew_limited=0;s->target_hold_ms=0;
+    s->on_ms=s->position=0;s->cycle_ready=0;
+  }
+  if(s->rail_recover){
+    s->zero_cause=5;
     if(++s->rail_ms>=2000){solder_stop(m,p,PSU_SOL_RAIL_TIMEOUT);return;}
-    /* Recover through a new 10 ms quiet phase; never rejoin an ON pulse. */
-    s->frame_ms=now;s->on_ms=s->position=0;s->cycle_ready=0;s->command=0;
-    s->integral=s->derivative=0;s->pid_ready=0;
-    return;
-  }else s->rail_ms=0;
+    if(p->vout_raw>=voltage*.95f && p->vout_raw<=voltage+.5f && !p->precharge_hold){
+      if(++s->rail_ready_ms>=20){
+        s->rail_recover=0;s->rail_ms=s->rail_ready_ms=0;
+        s->frame_ms=s->heat_started_ms=s->sample_ms=now;
+        s->ramp_ms=s->ramp_limit_pm=0;s->sum=0;s->count=0;
+      }
+    }else s->rail_ready_ms=0;
+    return; /* Resume only from a new 15 ms quiet window. */
+  }
+  s->rail_ms=0;
   if(now-s->frame_ms>=PSU_SOLDER_FRAME_MS){
     s->frame_ms=now;s->on_ms=0;s->cycle_ready=0;s->command=0;
     s->sum=0;s->count=0;
@@ -162,14 +238,61 @@ static void solder_tick(PsuModes *m,PsuControl *p,uint32_t now){
        s->last_sample_ms-s->frame_ms>=PSU_SOLDER_FRAME_MS){
       s->valid=0;solder_stop(m,p,PSU_SOL_STALE);return;
     }
-    s->command=solder_pid(s);
+    /* V5's actual call site processes the quiet ADC mean first, samples
+       PB11 next, then updates PWM PID. Do not debounce from ON noise or
+       from the same held pin reading every 5 ms. */
+    uint8_t sleeping=s->sleeping;
+    if(!s->stand){s->stand_count=0;s->sleeping=0;}
+    else if(s->stand_count<PSU_SOLDER_STAND_SAMPLES){
+      if(++s->stand_count==PSU_SOLDER_STAND_SAMPLES)s->sleeping=1;
+    }
+    if(sleeping!=s->sleeping){
+      s->zero_cause=6;s->stand_ms=now;solder_target(s,&p->settings,1);
+      /* Keep valid temperature, request, runtime and source routing. Start
+         a new quiet frame; PID resumes without an added duty ramp. */
+      s->pid_demand=s->d_term=s->slew_duty=0;s->slew_limited=0;
+      s->command=s->duty=0;s->on_ms=s->position=0;s->cycle_ready=0;
+      s->frame_ms=s->heat_started_ms=s->sample_ms=now;
+      s->ramp_ms=s->ramp_limit_pm=0;s->sum=0;s->count=0;
+      return;
+    }
+    uint32_t duty_limit_pm=(uint32_t)(p->settings.solder_duty_max*10.0f);
+    if(duty_limit_pm>PSU_SOLDER_HARD_MAX_PM)duty_limit_pm=PSU_SOLDER_HARD_MAX_PM;
+    if(duty_limit_pm>s->load_limit_pm)duty_limit_pm=s->load_limit_pm;
+    uint32_t ramp_age=now-s->heat_started_ms;
+    s->ramp_ms=(uint16_t)(ramp_age>PSU_SOLDER_RAMP_MS?PSU_SOLDER_RAMP_MS:ramp_age);
+#if PSU_SOLDER_RAMP_MS > 0
+    s->ramp_limit_pm=(uint16_t)(duty_limit_pm*s->ramp_ms/PSU_SOLDER_RAMP_MS);
+#else
+    s->ramp_limit_pm=(uint16_t)duty_limit_pm;
+#endif
+    /* One shot per requested target/start/wake. Count only independent
+       quiet results, not the retained temperature in 1 kHz ticks. */
+    if(!s->sleeping && !s->target_announced &&
+       s->temperature>=s->active_target-PSU_SOLDER_TARGET_BAND_C &&
+       s->temperature<=s->active_target+PSU_SOLDER_TARGET_BAND_C){
+      s->target_hold_ms+=PSU_SOLDER_FRAME_MS;
+      if(s->target_hold_ms>=PSU_SOLDER_TARGET_HOLD_MS){s->target_announced=1;++s->target_event;}
+    }else if(!s->target_announced)s->target_hold_ms=0;
+    float previous_integral=s->integral;
+    s->pid_demand=solder_pid(s,&p->settings);
+    float applied=s->pid_demand;s->slew_limited=0;
+    /* Smooth only normal PID reductions below target. Setpoint decreases,
+       supply recovery, reduced duty cap, sensor faults and STOP stay immediate. */
+    if(s->temperature<s->active_target && applied<s->slew_duty-PSU_SOLDER_DOWN_STEP &&
+       s->slew_duty<=s->ramp_limit_pm*0.001f+0.0001f){
+      applied=s->slew_duty-PSU_SOLDER_DOWN_STEP;s->slew_limited=1;
+      s->integral=previous_integral; /* No windup while actual heat exceeds demand. */
+    }
+    s->slew_duty=s->command=applied;
     s->on_ms=s->command>0?PSU_SOLDER_HEAT_MAX_MS:0;
     s->cycle_ready=1;
     /* Do not publish a leftover partial quiet mean after heater PWM starts. */
     s->sum=0;s->count=0;s->sample_ms=now;
   }
-  /* 10 kHz carrier duty during the heat window; 10 ms quiet remains fully OFF. */
+  /* 10 kHz carrier duty during the heat window; 15 ms quiet remains fully OFF. */
   if(s->valid && s->position<PSU_SOLDER_QUIET_MS+s->on_ms)s->duty=s->command;
+  s->zero_cause=s->duty>0?0u:s->sleeping?6u:4u;
 }
 /* Pack totals only. A correctly rated external BMS supplies per-cell
    protection/balancing. There is no battery temperature input on this board.
@@ -190,9 +313,9 @@ void PsuModes_Stop(PsuModes *m,PsuControl *p){
 }
 void PsuModes_SetCurrent(PsuModes *m,uint16_t ma){if(m->current_ma!=ma){m->current_ma=ma;m->tail_ms=0;}}
 int PsuModes_Select(PsuModes *m,PsuControl *p,uint8_t mode,uint32_t now){
-  if(mode>PSU_MODE_SOLDER || PsuModes_Busy(m,p))return 0;
+  if(mode>PSU_MODE_DUTY || PsuModes_Busy(m,p))return 0;
   if(m->mode==PSU_MODE_LAB){m->lab_mv=(uint16_t)(p->voltage_set*1000+0.5f);m->lab_ma=(uint16_t)(p->current_set*1000+0.5f);}
-  Psu_Disable(p);m->mode=mode;m->changed_ms=now;m->phase=PSU_CH_IDLE;m->error=0;m->run_seconds=m->run_fraction=0;m->was_active=0;
+  Psu_Disable(p);p->open_loop=mode==PSU_MODE_DUTY;m->mode=mode;m->changed_ms=now;m->phase=PSU_CH_IDLE;m->error=0;m->run_seconds=m->run_fraction=0;m->was_active=0;
   if(mode==PSU_MODE_CHARGE){
     m->discharge_inhibit=1;
     if(m->current_ma>p->settings.i_max*1000)m->current_ma=(uint16_t)(p->settings.i_max*1000);
@@ -200,7 +323,7 @@ int PsuModes_Select(PsuModes *m,PsuControl *p,uint8_t mode,uint32_t now){
   } else if(mode==PSU_MODE_LAB){
     float v=m->lab_mv/1000.0f,i=m->lab_ma/1000.0f;
     Psu_Setpoint(p,v>p->settings.vout_max?p->settings.vout_max:v,i>p->settings.i_max?p->settings.i_max:i);
-  } else solder_begin(m,now);
+  } else if(mode==PSU_MODE_SOLDER)solder_begin(m,now);
   return 1;
 }
 static void target(PsuModes *m,PsuControl *p){
@@ -211,7 +334,7 @@ static void target(PsuModes *m,PsuControl *p){
 int PsuModes_Start(PsuModes *m,PsuControl *p,uint32_t now){
   if(PsuModes_Busy(m,p))return 0;
   if(now-m->changed_ms<100){m->error=PSU_CH_SWITCH;return 0;}
-  if(m->mode==PSU_MODE_LAB){int ok=Psu_Enable(p);if(ok){m->was_active=0;m->run_seconds=m->run_fraction=0;}return ok;}
+  if(m->mode==PSU_MODE_LAB || m->mode==PSU_MODE_DUTY){int ok=Psu_Enable(p);if(ok){m->was_active=0;m->run_seconds=m->run_fraction=0;}return ok;}
   if(!healthy(p)){m->error=PSU_CH_HEALTH;return 0;}
   if(m->mode==PSU_MODE_SOLDER){solder_begin(m,now);m->was_active=0;m->run_seconds=m->run_fraction=0;return 1;}
   if(m->cells<1 || m->cells>6 || m->chemistry>PSU_CELL_LIFEPO4 || m->hours<1 || m->hours>12 ||
@@ -234,7 +357,7 @@ void PsuModes_Tick(PsuModes *m,PsuControl *p,uint32_t now){
   } else m->low_output_ms=0;
   if(m->mode==PSU_MODE_SOLDER){
     solder_tick(m,p,now);
-    if(!m->solder_request || !solder_healthy(p))m->solder_on=0;
+    if(!m->solder_request)m->solder_on=0;
   }
   if(m->mode==PSU_MODE_CHARGE && m->phase==PSU_CH_CHECK){
     if(!healthy(p))finish(m,p,PSU_CH_ERROR,PSU_CH_HEALTH);

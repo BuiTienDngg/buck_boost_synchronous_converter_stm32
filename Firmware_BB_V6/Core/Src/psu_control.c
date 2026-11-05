@@ -45,7 +45,7 @@ void Psu_Disable(PsuControl *p) {
   p->cv_i = p->cc_i = p->reference_v = 0.0f;
   p->cv_command = p->cc_command = p->current_limit = 0.0f;
   p->dv_rate=p->di_rate=0;
-  p->precharge_hold=0;
+  p->precharge_hold=p->soft_off=0;
   p->uv_ms = p->short_ms = 0;
   p->start_block = 0;
   p->state = p->fault ? PSU_FAULT : PSU_OFF;
@@ -66,10 +66,10 @@ static void trip_raw(PsuControl *p, uint32_t fault, uint16_t v, uint16_t i, uint
   trip(p, fault);
 }
 uint32_t Psu_FastSample(PsuControl *p, uint16_t v, uint16_t i, uint16_t in) {
-  /* The two-sample OCP counter deliberately survives DMA half/full boundaries. */
-  if (i >= p->ocp_raw) { if (p->ocp_count < 2) ++p->ocp_count; } else p->ocp_count = 0;
+  /* The five-sample OCP counter deliberately survives DMA half/full boundaries. */
+  if (i >= p->ocp_raw) { if (p->ocp_count < 5) ++p->ocp_count; } else p->ocp_count = 0;
   if (v >= 4090 || i >= 4090 || in >= 4090) { if (p->rail_count < 2) ++p->rail_count; } else p->rail_count = 0;
-  if (p->ocp_count >= 2) trip_raw(p, PSU_F_OCP, v, i, in);
+  if (p->ocp_count >= 5) trip_raw(p, PSU_F_OCP, v, i, in);
   if (p->rail_count >= 2) trip_raw(p, PSU_F_SENSOR, v, i, in);
   /* Four consecutive raw conversions, spanning DMA half/full boundaries.
      No averaging: a clean reading or an OFF resets the confirmation. */
@@ -101,9 +101,13 @@ void Psu_Temperature(PsuControl *p, float t, uint8_t valid) {
   /* Raw temperature protects before the display filter. */
   if (p->enabled && (!p->temp_valid || t >= p->settings.temp_trip)) trip(p, p->temp_valid ? PSU_F_OTP : PSU_F_SENSOR);
 }
+static float vin_floor(const PsuControl *p){
+  float sag_limit=0.9f*p->input_nominal_v;
+  return sag_limit>p->settings.vin_min?sag_limit:p->settings.vin_min;
+}
 static int healthy(const PsuControl *p) {
   return p->initialized && p->adc_age_ms < 3 && p->temp_age_ms < 200 && p->temp_valid &&
-    p->vin_raw >= p->settings.vin_min + 0.2f && p->vin_raw < p->settings.vin_max - 0.5f &&
+    p->vin_raw >= vin_floor(p) + 0.2f && p->vin_raw < p->settings.vin_max - 0.5f &&
     p->temp_c < p->settings.temp_reset && p->current_raw < 0.2f;
 }
 int Psu_Enable(PsuControl *p) {
@@ -112,7 +116,7 @@ int Psu_Enable(PsuControl *p) {
   if (p->fault) reason |= PSU_B_FAULT;
   if (!p->initialized || p->adc_age_ms >= 3) reason |= PSU_B_ADC;
   if (!p->temp_valid || p->temp_age_ms >= 200) reason |= PSU_B_TEMP;
-  if (p->vin_raw < p->settings.vin_min + 0.2f) reason |= PSU_B_VIN_LOW;
+  if (p->vin_raw < vin_floor(p) + 0.2f) reason |= PSU_B_VIN_LOW;
   if (p->vin_raw >= p->settings.vin_max - 0.5f) reason |= PSU_B_VIN_HIGH;
   if (p->temp_c >= p->settings.temp_reset) reason |= PSU_B_HOT;
   if (p->current_raw >= 0.2f) reason |= PSU_B_CURRENT;
@@ -149,9 +153,9 @@ void Psu_Tick1kHz(PsuControl *p) {
   if (p->adc_age_ms >= 3 || p->temp_age_ms >= 200) trip(p, PSU_F_ADC);
   if (!p->temp_valid) trip(p, PSU_F_SENSOR);
   if (p->temp_c >= p->settings.temp_trip) trip(p, PSU_F_OTP);
-  if (p->vin_raw < p->settings.vin_min) { if (++p->uv_ms >= 5) trip(p, PSU_F_VIN_UV); } else p->uv_ms = 0;
+  if (p->vin_raw < vin_floor(p)) { if (++p->uv_ms >= 5) trip(p, PSU_F_VIN_UV); } else p->uv_ms = 0;
   if (p->vin_raw > p->settings.vin_max) trip(p, PSU_F_VIN_OV);
-  if (p->continuous_i2 > p->settings.i_max * p->settings.i_max) {
+  if (p->open_loop && p->continuous_i2 > p->settings.i_max * p->settings.i_max) {
     if (++p->continuous_ms >= 100) trip(p, PSU_F_CONT_CURRENT);
   } else p->continuous_ms = 0;
   if (!p->enabled) return;
@@ -173,7 +177,8 @@ void Psu_Tick1kHz(PsuControl *p) {
     p->cv_i=p->cc_i=p->cv_command=p->cc_command=0;
     p->state=PSU_CV;return;
   }
-  p->reference_v=limit(p->reference_v+p->settings.ramp_v_per_s/PSU_CONTROL_HZ,0.0f,p->voltage_set);
+  p->reference_v=limit(p->reference_v+(p->soft_off?-2.0f:1.0f)*p->settings.ramp_v_per_s/PSU_CONTROL_HZ,
+    p->soft_off?PSU_VOUT_MIN_V:0.0f,p->voltage_set);
   /* Hold only an output precharged above its target, or a downward setpoint
      edit. A normal CV overshoot must be corrected by the regulator: cutting
      PWM and clearing its integrator every +50 mV created repeated bursts.
@@ -192,10 +197,22 @@ void Psu_Tick1kHz(PsuControl *p) {
   p->previous_v=p->vout;p->previous_i=p->current;
   ff = p->reference_v / limit(p->vin, p->settings.vin_min, p->settings.vin_max);
   max_power = limit(p->settings.input_current_max * p->vin * p->settings.efficiency, 0.0f, p->settings.power_max);
+  if(p->input_nominal_v){
+    float budget=0.9f*p->input_nominal_v*p->settings.input_current_max;
+    if(max_power>budget)max_power=budget;
+  }
   current_limit = limit(max_power / limit(p->vout, PSU_VOUT_MIN_V, PSU_OUTPUT_OVP_ABS_V), 0.0f, p->current_set);
   if (p->temp_c > p->settings.temp_warn) current_limit *= limit((p->settings.temp_trip - p->temp_c) / (p->settings.temp_trip - p->settings.temp_warn), 0.0f, 1.0f);
+  /* Fold back sustained RMS overload in regulated modes. */
+  float rms_limit2 = p->settings.i_max * p->settings.i_max;
+  if (p->continuous_i2 > rms_limit2)
+    current_limit *= rms_limit2 / p->continuous_i2;
   p->current_limit = current_limit;
-  ev = p->reference_v - p->vout; ei = current_limit - p->current;
+  /* Use the faster measurement on the limiting side of each loop. */
+  float voltage_feedback = p->vout_raw > p->vout ? p->vout_raw : p->vout;
+  float current_feedback = p->current_raw > p->current ? p->current_raw : p->current;
+  ev = p->reference_v - voltage_feedback;
+  ei = current_limit - current_feedback;
   cv = ff + p->settings.cv_kp * ev + p->cv_i - p->settings.cv_kd*p->dv_rate;
   /* Preserve the BBV6.5 regulator measured at 2 A; BBV6.6's experimental
      absolute-command CC implementation was not flashed/bench validated. */

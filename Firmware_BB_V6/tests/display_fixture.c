@@ -40,6 +40,8 @@ void preview(unsigned scenario) {
     s.modes.mode=PSU_MODE_CHARGE;s.modes.cells=2;s.modes.current_ma=1000;s.control.voltage_set=8.4f;s.control.current_set=1;s.control.vout=8.35f;s.control.current=0.8f;s.edit_current=1;s.edit_digit=1;
     s.modes.phase=scenario==18?PSU_CH_CCCV:scenario==19?PSU_CH_FULL:PSU_CH_ERROR;s.control.enabled=scenario==18;s.control.state=PSU_CC;
     if(scenario==20)s.modes.error=PSU_CH_HIGH;
+    s.modes.charge_start_mv=7400;s.modes.charge_end_mv=8350;
+    s.modes.charge_seconds=3718;s.modes.mah_d10=15842;
     if(scenario==19)s.control.current=0;
   }
   if(scenario==21){s.modes.solder.on_ms=18;s.hardware.heater=1;s.modes.mode=PSU_MODE_SOLDER;s.modes.solder_request=s.modes.solder_on=1;s.modes.solder.phase=PSU_SOL_RUN;s.modes.solder.valid=1;s.modes.solder.temperature=299;s.modes.solder.raw=1522;s.modes.solder.active_target=300;s.control.vout=24;s.control.current=2.1f;}
@@ -103,7 +105,7 @@ void preview(unsigned scenario) {
     if(scenario==51)s.menu.selected=1;
     PsuDisplay_Update(&s);
   }
-  if(scenario>=52){
+  if(scenario>=52 && scenario<=59){
     s.control.settings.solder_current=3;s.control.current=1.5f;s.modes.solder.command=.4f;PsuDisplay_Update(&s);
     preview_bytes=0;
     if(scenario==53)s.control.current=3.4f;
@@ -113,6 +115,30 @@ void preview(unsigned scenario) {
     if(scenario==57){s.modes.solder_request=0;s.control.current=0;}
     if(scenario==58){s.control.fault=PSU_F_OVP;s.control.current=0;}
     if(scenario==59)s.modes.run_seconds++;
+    PsuDisplay_Update(&s);
+  }
+  if(scenario==60){
+    s.menu.solder_display=PSU_DISPLAY_GRAPH;
+    s.modes.mode=PSU_MODE_SOLDER;
+    s.modes.solder.valid=1;
+    s.modes.solder.active_target=300;
+    for(unsigned n=0;n<16;++n){
+      s.modes.solder.last_sample_ms=HAL_GetTick();
+      s.modes.solder.temperature=30+n*16;
+      PsuDisplay_Update(&s);
+      HAL_Delay(250);
+    }
+  }
+  if(scenario==61){
+    s.modes.mode=PSU_MODE_VOLTMETER;
+    s.control.enabled=0;s.control.initialized=1;s.control.adc_age_ms=0;
+    s.control.vout=s.control.vout_raw=12.34f;
+    s.meter_period_ms=100;PsuDisplay_Update(&s);
+    s.meter_period_ms=20;PsuDisplay_Update(&s);
+  }
+  if(scenario==62){
+    s.modes.mode=PSU_MODE_LAB;s.menu.display=PSU_DISPLAY_NUMBER;
+    s.menu.light_theme=1;
     PsuDisplay_Update(&s);
   }
   /* The underline must move when only the digit changes. */

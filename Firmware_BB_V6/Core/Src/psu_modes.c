@@ -26,17 +26,26 @@ static uint32_t solder_status(const PsuControl *p){
     (p->temp_c>=p->settings.temp_trip?64u:0u)|(p->vin_raw<p->settings.vin_min?128u:0u)|
     (p->vin_raw>=p->settings.vin_max?256u:0u);
 }
-/* Temporary user calibration, shared by both tip selections:
-   ADC 1193 = 29 C, slope 0.5 C per ADC count. */
-static float solder_temperature(float raw,uint8_t tip){
-  (void)tip;
-  return 29.0f+(raw-1193.0f)/2.0f;
+/* C245 measured on this board. Extend the nearest segment outside the table. */
+static float solder_temperature(float raw,const PsuSolder *s){
+  static const uint16_t adc[]={1216,1555,1755,1855};
+  static const uint16_t degrees[]={32,260,350,396};
+  if(s->tip==PSU_TIP_C210)return -31.0f+(raw-1193.0f)*0.5f;
+  unsigned lo=raw<adc[1]?0u:raw<adc[2]?1u:2u;
+  unsigned hi=lo+1u;
+  return degrees[lo]+(raw-adc[lo])*(degrees[hi]-degrees[lo])/(adc[hi]-adc[lo]);
 }
 void PsuSolder_SetTarget(PsuModes *m,int32_t degrees){
   m->solder.target=(uint16_t)(degrees<150?150:degrees>450?450:degrees);
 }
 static void solder_begin(PsuModes *m,uint32_t now){
   PsuSolder *s=&m->solder;
+  if(s->tip==PSU_TIP_GOOT){
+    m->solder_request=m->solder_on=0;
+    s->duty=s->command=0;s->valid=0;
+    s->phase=PSU_SOL_ERROR;s->error=PSU_SOL_CONFIG;
+    return;
+  }
   m->discharge_inhibit=1;m->solder_request=1;m->solder_on=0;
   s->health_now=s->health_seen=s->stop_flags=s->stop_fault=s->stop_block=s->stop_ms=0;
   s->pid_demand=s->d_term=s->slew_duty=s->stop_heat_cmd=0;s->slew_limited=0;
@@ -52,11 +61,11 @@ static void solder_begin(PsuModes *m,uint32_t now){
 void PsuSolder_Sample(PsuModes *m,uint16_t raw,uint32_t now){
   PsuSolder *s=&m->solder;
   s->raw=raw;
-  if(m->mode!=PSU_MODE_SOLDER)return;
+  if(m->mode!=PSU_MODE_SOLDER || s->tip==PSU_TIP_GOOT)return;
 #if PSU_SOLDER_TEMP_PROTECTION
-  float t=solder_temperature(raw,s->tip);
+  float t=solder_temperature(raw,s);
   /* Do not clamp bad readings before testing sensor/overtemperature. */
-  if(raw<8 || raw>4087 || t < -30 || t>500){
+  if(raw<8 || raw>4087 || t < -90.0f || t>500){
     if(!s->error){s->trip_adc=raw;s->error=t>500?PSU_SOL_HOT:PSU_SOL_SENSOR;}
     s->valid=0;s->duty=0;return;
   }
@@ -140,15 +149,15 @@ static void solder_tick(PsuModes *m,PsuControl *p,uint32_t now){
   if(now-s->sample_ms>=PSU_SOLDER_SAMPLE_MS){
     s->sample_ms=now;
     if(s->count>=2){
-      s->temperature=solder_temperature((float)s->sum/s->count,s->tip);
+      s->temperature=solder_temperature((float)s->sum/s->count,s);
       s->valid=1;s->last_sample_ms=now;
 #if PSU_SOLDER_TEMP_PROTECTION
       if(s->temperature>=s->baseline+5 || s->temperature>=s->active_target-50){s->baseline=s->temperature;s->watch_ms=0;}
       if(m->solder_request && s->watch_ms>=15000){solder_stop(m,p,PSU_SOL_NO_RISE);return;}
-      if(s->temperature>s->target+60){
-        s->hot_ms+=PSU_SOLDER_SAMPLE_MS;
-        if(m->solder_request && s->hot_ms>=1000){solder_stop(m,p,PSU_SOL_HOT);return;}
-      }else s->hot_ms=0;
+      /* Absolute tip limit is enforced by the sensor conversion above.
+         Do not compare against the user setpoint: lowering target while the
+         tip is cooling must command zero heat, not latch an overtemp. */
+      s->hot_ms=0;
 #endif
     }
     s->sum=0;s->count=0;
@@ -182,6 +191,9 @@ static void solder_tick(PsuModes *m,PsuControl *p,uint32_t now){
     if(p->vout_raw>voltage+0.5f){if(now-s->started_ms>=30000)solder_stop(m,p,PSU_SOL_RAIL_TIMEOUT);return;}
     Psu_Setpoint(p,voltage,current);
     if(!Psu_Enable(p)){solder_stop(m,p,PSU_SOL_HEALTH);return;}
+    /* In SOLDER, take the source directly to Vset. Heater stays OFF until
+       the rail is stable; thermal PID controls heater duty afterward. */
+    p->reference_v=p->voltage_set;
     s->phase=PSU_SOL_PRECHARGE;s->rail_ms=0;
   }
   if(s->phase==PSU_SOL_PRECHARGE){
@@ -313,7 +325,9 @@ void PsuModes_Stop(PsuModes *m,PsuControl *p){
 }
 void PsuModes_SetCurrent(PsuModes *m,uint16_t ma){if(m->current_ma!=ma){m->current_ma=ma;m->tail_ms=0;}}
 int PsuModes_Select(PsuModes *m,PsuControl *p,uint8_t mode,uint32_t now){
-  if(mode>PSU_MODE_DUTY || PsuModes_Busy(m,p))return 0;
+  if(mode>PSU_MODE_VOLTMETER || PsuModes_Busy(m,p))return 0;
+  if(m->mode==PSU_MODE_VOLTMETER && mode!=PSU_MODE_VOLTMETER &&
+     (!p->initialized || p->adc_age_ms>=3 || p->vout_raw>0.5f))return 0;
   if(m->mode==PSU_MODE_LAB){m->lab_mv=(uint16_t)(p->voltage_set*1000+0.5f);m->lab_ma=(uint16_t)(p->current_set*1000+0.5f);}
   Psu_Disable(p);p->open_loop=mode==PSU_MODE_DUTY;m->mode=mode;m->changed_ms=now;m->phase=PSU_CH_IDLE;m->error=0;m->run_seconds=m->run_fraction=0;m->was_active=0;
   if(mode==PSU_MODE_CHARGE){
@@ -332,16 +346,18 @@ static void target(PsuModes *m,PsuControl *p){
   if(p->voltage_set!=v || p->current_set!=i)Psu_Setpoint(p,v,i);
 }
 int PsuModes_Start(PsuModes *m,PsuControl *p,uint32_t now){
-  if(PsuModes_Busy(m,p))return 0;
+  if(m->mode==PSU_MODE_VOLTMETER || PsuModes_Busy(m,p))return 0;
   if(now-m->changed_ms<100){m->error=PSU_CH_SWITCH;return 0;}
-  if(m->mode==PSU_MODE_LAB || m->mode==PSU_MODE_DUTY){int ok=Psu_Enable(p);if(ok){m->was_active=0;m->run_seconds=m->run_fraction=0;}return ok;}
+  if(m->mode==PSU_MODE_LAB || m->mode==PSU_MODE_DUTY){int ok=Psu_Enable(p);if(ok){m->started_ms=now;m->was_active=0;m->run_seconds=m->run_fraction=0;}return ok;}
   if(!healthy(p)){m->error=PSU_CH_HEALTH;return 0;}
-  if(m->mode==PSU_MODE_SOLDER){solder_begin(m,now);m->was_active=0;m->run_seconds=m->run_fraction=0;return 1;}
+  if(m->mode==PSU_MODE_SOLDER){solder_begin(m,now);if(!m->solder_request)return 0;m->was_active=0;m->run_seconds=m->run_fraction=0;return 1;}
   if(m->cells<1 || m->cells>6 || m->chemistry>PSU_CELL_LIFEPO4 || m->hours<1 || m->hours>12 ||
      m->current_ma<100 || m->current_ma>p->settings.i_max*1000 || full(m)>p->settings.vout_max){finish(m,p,PSU_CH_ERROR,PSU_CH_CONFIG);return 0;}
   if(p->vout_raw<minimum(m)){finish(m,p,PSU_CH_ERROR,PSU_CH_LOW);return 0;}
   if(p->vout_raw>full(m)+0.03f*m->cells){finish(m,p,PSU_CH_ERROR,PSU_CH_HIGH);return 0;}
   m->discharge_inhibit=1;m->phase=PSU_CH_CHECK;m->error=0;m->started_ms=m->phase_ms=now;
+  m->charge_start_mv=(uint16_t)(p->vout_raw*1000.0f+0.5f);
+  m->charge_end_mv=0;m->charge_seconds=0;
   m->tail_ms=m->pre_ready_ms=m->low_ms=m->mah_d10=m->charge_integral=0;m->current_seen=0;
   m->near_full=p->vout_raw>=full(m)-0.05f*m->cells;m->run_seconds=m->run_fraction=0;m->was_active=0;
   /* Tight raw OVP is applied by the ADC producer before every fast sample.
@@ -369,7 +385,10 @@ void PsuModes_Tick(PsuModes *m,PsuControl *p,uint32_t now){
     }
   }
   if(m->mode==PSU_MODE_CHARGE && (m->phase==PSU_CH_PRE || m->phase==PSU_CH_CCCV)){
-    if(!p->enabled)finish(m,p,PSU_CH_ERROR,PSU_CH_HEALTH);
+    m->charge_seconds=(now-m->started_ms)/1000u;
+    m->charge_end_mv=(uint16_t)(p->vout_raw*1000.0f+0.5f);
+    if(p->vout_raw>full(m)+0.03f*m->cells)finish(m,p,PSU_CH_ERROR,PSU_CH_HIGH);
+    else if(!p->enabled)finish(m,p,PSU_CH_ERROR,PSU_CH_HEALTH);
     else if(now-m->started_ms>=(uint32_t)m->hours*3600000u)finish(m,p,PSU_CH_ERROR,PSU_CH_TIMEOUT);
     else {
       target(m,p);

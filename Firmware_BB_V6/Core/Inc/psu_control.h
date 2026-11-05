@@ -24,7 +24,7 @@ typedef struct {
 } PsuFaultSample;
 
 typedef struct {
-  uint8_t open_loop;
+  uint8_t open_loop, input_nominal_v;
   uint16_t manual_duty_pm;
   float vin, vout, current, temp_c;
   float vin_raw, vout_raw, current_raw;
@@ -42,7 +42,7 @@ typedef struct {
   uint16_t continuous_ms, uv_ms, ready_ms, short_ms;
   uint8_t state;
   volatile uint8_t enabled;
-  uint8_t temp_valid, initialized, vin_warning, precharge_hold;
+  uint8_t temp_valid, initialized, vin_warning, precharge_hold, soft_off;
   PsuFaultSample fault_sample;
 } PsuControl;
 uint32_t Psu_ConfigErrors(void);

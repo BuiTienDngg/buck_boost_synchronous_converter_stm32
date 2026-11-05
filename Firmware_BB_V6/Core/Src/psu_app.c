@@ -43,6 +43,9 @@ static uint16_t encoder_old;
 static int32_t encoder_remainder;
 static uint8_t edit_current, voltage_digit, current_digit, selected_preset, save_pending, saved_notice;
 static uint8_t tx_buffer[2304];
+static const uint16_t meter_periods[]={500,100,20};
+static uint8_t meter_rate=1;
+static uint32_t last_meter;
 static uint32_t tx_length;
 static struct {
   uint32_t started, last_pulse, window, pulses;
@@ -135,6 +138,30 @@ static void discharge_arm(uint32_t now) {
   discharge.initial_v = discharge.window_v = control.vout_raw;
   discharge.pulses = 0; discharge.ticks = 0; discharge.fired = 0;
 }
+/* Keep closed-loop PWM during a normal, loaded LAB shutdown. Once
+   forward current disappears the board cannot regulate reverse current. */
+static void stop_output(uint8_t immediate){
+  uint8_t was_enabled=control.enabled;
+  if(!immediate && !control.soft_off && was_enabled && modes.mode==PSU_MODE_LAB &&
+     !control.fault && !control.precharge_hold && control.current_raw>=0.25f &&
+     control.reference_v>PSU_VOUT_MIN_V && control.duty_buck>0){
+    control.soft_off=1;
+    return;
+  }
+  PsuModes_Stop(&modes,&control);
+  if(was_enabled && !control.fault && !immediate)discharge_arm(HAL_GetTick());
+}
+/* A running LAB downstep stays in closed-loop PWM. The startup
+   precharge hold still applies when enabling an already charged output. */
+static void apply_setpoint(float volts,float amps){
+  if(control.soft_off)return;
+  float old=control.voltage_set;
+  Psu_Setpoint(&control,volts,amps);
+  if(modes.mode==PSU_MODE_LAB && control.enabled && control.voltage_set<old){
+    if(control.precharge_hold)control.reference_v=control.voltage_set;
+    control.precharge_hold=0;
+  }
+}
 /* Called inside the locked actuator only. No software wait controls gate ON
    time. PWM2 ends LOW at the OPM update, even if TIM4 stops running. */
 static int discharge_actuator(uint32_t now) {
@@ -206,8 +233,8 @@ static void actuator(void) {
     if (discharge.state == PSU_D_WAIT && HAL_GetTick() - discharge.started >= (uint32_t)control.settings.discharge_timeout)
       discharge_stop(PSU_D_TIMEOUT);
   }
-  else if (discharge_actuator(HAL_GetTick())) { /* Hardware one-shot or its low-side decay interval. */ }
-  else if (PSU_LOW_SIDE_TEST || !control.enabled || control.duty_buck <= 0.0f) {
+  else if (modes.mode!=PSU_MODE_VOLTMETER && discharge_actuator(HAL_GetTick())) { /* Hardware one-shot or its low-side decay interval. */ }
+  else if (modes.mode==PSU_MODE_VOLTMETER || PSU_LOW_SIDE_TEST || !control.enabled || control.duty_buck <= 0.0f) {
     /* Force BOTH IN pins low immediately, even if a nonzero compare is still
        active in the PWM preload registers. Keep low sides ON in normal OFF
        and zero-command RUN. The emergency path above disables /SD and heater. */
@@ -321,15 +348,15 @@ static void remote_execute(uint32_t off_requested) {
   else switch(remote.op) {
   case REM_GET:break;
   case REM_SET:
-    if(modes.mode==PSU_MODE_SOLDER || menu.page)remote_error="local_mode_required";
+    if(control.soft_off || modes.mode==PSU_MODE_SOLDER || modes.mode==PSU_MODE_VOLTMETER || menu.page)remote_error="local_mode_required";
     else if(modes.mode==PSU_MODE_CHARGE && (remote.arg[0]!=PsuModes_FullMillivolts(&modes) || remote.arg[1]<100))remote_error="setpoint_range";
     else if(remote.arg[0]<1500 || remote.arg[0]>control.settings.vout_max*1000.0f+0.5f ||
        remote.arg[1]<50 || remote.arg[1]>control.settings.i_max*1000.0f+0.5f)remote_error="setpoint_range";
-    else {request_v=(uint32_t)remote.arg[0];request_i=(uint32_t)remote.arg[1];if(modes.mode==PSU_MODE_CHARGE)PsuModes_SetCurrent(&modes,(uint16_t)request_i);else Psu_Setpoint(&control,request_v/1000.0f,request_i/1000.0f);}
+    else {request_v=(uint32_t)remote.arg[0];request_i=(uint32_t)remote.arg[1];if(modes.mode==PSU_MODE_CHARGE)PsuModes_SetCurrent(&modes,(uint16_t)request_i);else apply_setpoint(request_v/1000.0f,request_i/1000.0f);}
     break;
   case REM_ON:
     if(off_requested || cancel_remote_on)remote_error="cancelled";
-    else if(menu.page || modes.mode==PSU_MODE_SOLDER)remote_error="local_mode_required";
+    else if(menu.page || modes.mode==PSU_MODE_SOLDER || modes.mode==PSU_MODE_VOLTMETER)remote_error="local_mode_required";
     else if(PSU_LOW_SIDE_TEST)remote_error="test_mode";
     else {
       discharge_stop(PSU_D_IDLE);
@@ -339,7 +366,7 @@ static void remote_execute(uint32_t off_requested) {
     break;
   case REM_HEAT:
     if(off_requested || cancel_remote_on)remote_error="cancelled";
-    else if(menu.page || modes.mode==PSU_MODE_CHARGE)remote_error="local_mode_required";
+    else if(menu.page || modes.mode==PSU_MODE_CHARGE || modes.mode==PSU_MODE_VOLTMETER)remote_error="local_mode_required";
     else if(!PSU_SOLDER_TEMP_PROTECTION || remote.arg[0]<100 || remote.arg[0]>10000 ||
       remote.arg[1]<150 || remote.arg[1]>250 || control.settings.solder_voltage>18 ||
       control.settings.solder_current>3)remote_error="bench_range";
@@ -356,8 +383,7 @@ static void remote_execute(uint32_t off_requested) {
     }
     break;
   case REM_OFF: {
-    uint8_t was_enabled=control.enabled;request&=~8u;PsuModes_Stop(&modes,&control);
-    if(was_enabled && !control.fault)discharge_arm(HAL_GetTick());
+    request&=~8u;stop_output(0);
     break;
   }
   case REM_CLEAR:if(!Psu_ClearFault(&control))remote_error="clear_conditions";else timing_sources=timing_value=0;break;
@@ -409,13 +435,11 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *tim) {
     }
   }
   if (command & 1u) {
-    uint8_t was_enabled = control.enabled;
-    PsuModes_Stop(&modes,&control); command &= ~8u;
-    if (was_enabled && !control.fault && !(command & 16u)) discharge_arm(HAL_GetTick());
+    stop_output((command&16u)!=0);command&=~8u;
   }
   if (command & 2u) {
     if(modes.mode==PSU_MODE_CHARGE)PsuModes_SetCurrent(&modes,(uint16_t)request_i);
-    else if(modes.mode==PSU_MODE_LAB)Psu_Setpoint(&control, request_v / 1000.0f, request_i / 1000.0f);
+    else if(modes.mode==PSU_MODE_LAB)apply_setpoint(request_v / 1000.0f, request_i / 1000.0f);
   }
   if (command & 4u) {
     if(Psu_ClearFault(&control)){timing_sources=timing_value=0;}
@@ -439,6 +463,9 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *tim) {
     control.fault |= PSU_F_TIMING; Psu_Disable(&control);
   }
   Psu_Tick1kHz(&control);
+  if(control.soft_off && (control.reference_v<=PSU_VOUT_MIN_V || control.current_raw<0.25f ||
+      control.vout_raw>control.reference_v+0.35f || control.duty_buck<=0))
+    stop_output(0);
   if (discharge.state == PSU_D_WAIT && control.ready_ms >= 100 && !control.fault && !control.config_errors) {
     discharge.last_pulse = discharge.window = HAL_GetTick(); discharge.window_v = control.vout_raw;
     discharge.state = PSU_D_ACTIVE;
@@ -453,6 +480,11 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *tim) {
        holder_pos>=PSU_SOLDER_QUIET_MS && holder_pos<PSU_SOLDER_FRAME_MS)))
     modes.solder.stand=HAL_GPIO_ReadPin(solder_stand_GPIO_Port,solder_stand_Pin)==GPIO_PIN_RESET;
   PsuModes_Tick(&modes,&control,HAL_GetTick());
+  if(modes.mode==PSU_MODE_LAB && control.enabled && menu.timer_minutes &&
+     HAL_GetTick()-modes.started_ms>=60000u*menu.timer_minutes){
+    PsuModes_Stop(&modes,&control);
+    discharge_arm(HAL_GetTick());
+  }
   if(remote_heat_active && ((int32_t)(HAL_GetTick()-remote_heat_until)>=0 || !modes.solder_request || hUsbDeviceFS.dev_state!=USBD_STATE_CONFIGURED)){
     if(modes.solder_request)PsuModes_Stop(&modes,&control);
     heater_off();
@@ -468,7 +500,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *tim) {
 void HAL_GPIO_EXTI_Callback(uint16_t pin) { (void)pin; /* Debounce and actions run in foreground. */ }
 void PsuApp_Snapshot(PsuView *v) {
   uint32_t key = lock(); v->control = control;
-  v->modes=modes;v->menu=menu;
+  v->modes=modes;v->menu=menu;v->meter_period_ms=meter_periods[meter_rate];
   v->discharge_state = discharge.state; v->discharge_pulses = discharge.pulses;
   v->discharge_ticks = discharge.ticks; v->settings_revision=settings_revision;
   v->hardware.arr=TIM1->ARR;v->hardware.psc=TIM1->PSC;
@@ -505,6 +537,7 @@ void PsuApp_Snapshot(PsuView *v) {
 }
 static void post(uint32_t bits) { uint32_t key = lock(); request |= bits; unlock(key); }
 static void set_values(uint32_t mv, uint32_t ma) {
+  if(control.soft_off)return;
   uint32_t max_ma = (uint32_t)(control.settings.i_max * 1000.0f + 0.5f);
   if (mv < (uint32_t)(PSU_VOUT_MIN_V * 1000.0f)) mv = (uint32_t)(PSU_VOUT_MIN_V * 1000.0f);
   if (mv > (uint32_t)(control.settings.vout_max * 1000.0f)) mv = (uint32_t)(control.settings.vout_max * 1000.0f);
@@ -542,7 +575,9 @@ static void menu_press(uint8_t long_press){
     else if(menu.selected==2)menu_page(PSU_MENU_SOLDER);
     else if(menu.selected==3)(void)select_mode(PSU_MODE_LAB);
     else if(menu.selected==4)menu_page(PSU_MENU_DISPLAY);
-    else if(menu.selected==5)(void)select_mode(PSU_MODE_DUTY);
+    else if(menu.selected==5)menu_page(PSU_MENU_CONFIG);
+    else if(menu.selected==6)(void)select_mode(PSU_MODE_VOLTMETER);
+    else if(menu.selected==7)menu_page(PSU_MENU_TIMER);
     else menu_page(PSU_MENU_CLOSED);
   } else if(menu.page==PSU_MENU_SOLDER){
     if(menu.selected==4){menu_page(PSU_MENU_ROOT);return;}
@@ -550,8 +585,18 @@ static void menu_press(uint8_t long_press){
     if(menu.selected==3){(void)select_mode(PSU_MODE_SOLDER);return;}
     menu.editing=1;
   } else if(menu.page==PSU_MENU_DISPLAY){
+    if(menu.selected==3){menu_page(PSU_MENU_ROOT);return;}
+    uint8_t *setting=menu.selected==0?&menu.display:menu.selected==1?&menu.solder_display:&menu.light_theme;
+    *setting^=1u;
+    save_pending=1;
+  } else if(menu.page==PSU_MENU_TIMER){
+    if(menu.selected==1){menu_page(PSU_MENU_ROOT);return;}
+    if(PsuModes_Busy(&modes,&control)){menu.notice=1;return;}
+    menu.editing=1;
+  } else if(menu.page==PSU_MENU_CONFIG){
     if(menu.selected==2){menu_page(PSU_MENU_ROOT);return;}
-    menu.display=menu.selected;menu_page(PSU_MENU_CLOSED);
+    if(PsuModes_Busy(&modes,&control)){menu.notice=1;return;}
+    menu.editing=1;
   } else if(menu.page==PSU_MENU_RAMP){
     if(menu.selected==3){menu_page(PSU_MENU_ROOT);return;}
     uint32_t key=lock();
@@ -568,12 +613,33 @@ static void menu_press(uint8_t long_press){
 }
 static void menu_rotate(int32_t steps){
   menu.notice=0;
-  if(!menu.editing){int count=menu.page==PSU_MENU_ROOT?7:menu.page==PSU_MENU_RAMP?4:menu.page==PSU_MENU_DISPLAY?3:menu.page==PSU_MENU_SOLDER?5:7;int at=((int)menu.selected+steps)%count;if(at<0)at+=count;menu.selected=(uint8_t)at;return;}
+  if(!menu.editing){int count=menu.page==PSU_MENU_ROOT?9:menu.page==PSU_MENU_RAMP?4:menu.page==PSU_MENU_DISPLAY?4:menu.page==PSU_MENU_SOLDER?5:menu.page==PSU_MENU_CONFIG?3:menu.page==PSU_MENU_TIMER?2:7;int at=((int)menu.selected+steps)%count;if(at<0)at+=count;menu.selected=(uint8_t)at;return;}
   uint32_t key=lock();
   if(PsuModes_Busy(&modes,&control)){menu.editing=0;menu.notice=1;unlock(key);return;}
   int32_t value;
+  if(menu.page==PSU_MENU_TIMER){
+    value=(int32_t)menu.timer_minutes+steps;
+    menu.timer_minutes=(uint8_t)(value<0?0:value>120?120:value);
+    unlock(key);return;
+  }
+  if(menu.page==PSU_MENU_CONFIG){
+    if(menu.selected==0){
+      int32_t max=(int32_t)control.settings.vin_max;
+      int32_t min=(int32_t)(control.settings.vin_min+0.999f);
+      value=control.input_nominal_v?control.input_nominal_v+steps:steps>0?min+steps-1:0;
+      control.input_nominal_v=(uint8_t)(value<min?0:value>max?max:value);
+    }else{
+      float amps=control.settings.input_current_max+steps*0.1f;
+      control.settings.input_current_max=amps<0.1f?0.1f:amps>PSU_INPUT_CURRENT_MAX_A?PSU_INPUT_CURRENT_MAX_A:amps;
+    }
+    save_pending=1;++settings_revision;control.ready_ms=0;
+    unlock(key);return;
+  }
   if(menu.page==PSU_MENU_SOLDER){
-    if(menu.selected==0)modes.solder.tip^=(uint8_t)(steps&1);
+    if(menu.selected==0){
+      value=((int)modes.solder.tip+steps)%3;
+      modes.solder.tip=(uint8_t)(value<0?value+3:value);
+    }
     else if(menu.selected==1)PsuSolder_SetTarget(&modes,modes.solder.target+steps*5);
     else {value=modes.solder.sleep_target+steps*5;modes.solder.sleep_target=(uint16_t)(value<150?150:value>250?250:value);}
     unlock(key);return;
@@ -592,6 +658,13 @@ static void button(unsigned button, uint8_t long_press) {
   uint8_t enabled=control.enabled,busy=(uint8_t)PsuModes_Busy(&modes,&control);
   unlock(snapshot_key);
   if (button == 0) {
+    if(!menu.page && modes.mode==PSU_MODE_VOLTMETER){
+      if(!long_press && !select_mode(PSU_MODE_LAB))menu.notice=1;
+      return;
+    }
+    if(!long_press && !menu.page && modes.mode==PSU_MODE_CHARGE && modes.phase==PSU_CH_FULL){
+      (void)select_mode(PSU_MODE_LAB);return;
+    }
     if(long_press || menu.page){menu_press(long_press);return;}
     if(modes.mode==PSU_MODE_SOLDER)return;
     uint8_t *digit = edit_current ? &current_digit : &voltage_digit;
@@ -599,6 +672,7 @@ static void button(unsigned button, uint8_t long_press) {
     encoder_remainder = 0;
   }
   else if (button == 1) { /* BT1 PB13: short ON/OFF, hold mode toggle. */
+    if(modes.mode==PSU_MODE_VOLTMETER)return;
     if(long_press){
       uint32_t key=lock();
       PsuModes_Stop(&modes,&control);
@@ -617,6 +691,10 @@ static void button(unsigned button, uint8_t long_press) {
   } else if(menu.page){if(button==2){if(menu.editing)menu.editing=0;else menu_page(menu.page==PSU_MENU_ROOT?PSU_MENU_CLOSED:PSU_MENU_ROOT);}return;}
   else if (button == 2) { if(modes.mode==PSU_MODE_CHARGE)edit_current=1;else edit_current ^= 1u; encoder_remainder = 0; }
   else {
+    if(modes.mode==PSU_MODE_VOLTMETER){
+      if(!long_press){menu.notice=0;meter_rate=(uint8_t)(button-3);last_meter=HAL_GetTick()-meter_periods[meter_rate];}
+      return;
+    }
     if(modes.mode==PSU_MODE_SOLDER){uint32_t key=lock();PsuSolder_SetTarget(&modes,250+(int32_t)(button-3)*50);unlock(key);return;}
     if(enabled || modes.mode!=PSU_MODE_LAB)return;
     unsigned slot = button - 3; selected_preset = (uint8_t)slot;
@@ -641,7 +719,7 @@ static void inputs(uint32_t now) {
         if (k == 1 && PsuModes_Busy(&modes,&control)) { post(1u); fired[k] = 2; }
       } else if (!fired[k]) button(k, 0);
     }
-    if (stable[k] && fired[k]!=1 && now - pressed[k] >= 1000u) { button(k, 1); fired[k] = 1; }
+    if (stable[k] && fired[k]!=1 && now - pressed[k] >= 700u) { button(k, 1); fired[k] = 1; }
   }
   { uint16_t value = (uint16_t)TIM2->CNT; delta = (int16_t)(value - encoder_old); encoder_old = value; }
   encoder_remainder += delta;
@@ -710,7 +788,7 @@ static uint32_t usb_reply(const PsuView *s) {
   static const char *ops[]={"GET","SET","ON","OFF","CLEAR","CFG","DEFAULTS","SAVE","PRESET","HEAT"};
   const char *error=remote_error?remote_error:"ok";
   int n=snprintf((char *)tx_buffer,sizeof(tx_buffer),
-    "{\"type\":\"reply\",\"protocol\":1,\"fw\":\"BBV6.67-LOAD-BACKOFF\",\"id\":%lu,\"op\":\"%s\",\"ok\":%s,\"error\":\"%s\",\"rev\":%lu,\"enabled\":%u,\"fault\":%lu,\"start_block\":%lu,\"set_mV\":%ld,\"set_mA\":%ld,\"softstart\":true,\"settings\":",
+    "{\"type\":\"reply\",\"protocol\":1,\"fw\":\"BBV6.88-FAST-CV-OFF\",\"id\":%lu,\"op\":\"%s\",\"ok\":%s,\"error\":\"%s\",\"rev\":%lu,\"enabled\":%u,\"fault\":%lu,\"start_block\":%lu,\"set_mV\":%ld,\"set_mA\":%ld,\"softstart\":true,\"settings\":",
     (unsigned long)remote.id,remote.op<10?ops[remote.op]:"?",remote_error?"false":"true",error,
     (unsigned long)s->settings_revision,s->control.enabled,(unsigned long)s->control.fault,(unsigned long)s->control.start_block,
     (long)(s->control.voltage_set*1000+0.5f),(long)(s->control.current_set*1000+0.5f));
@@ -747,7 +825,25 @@ static void usb_poll(uint32_t now) {
     if(tx_length){key=lock();if(CDC_Transmit_FS(tx_buffer,(uint16_t)tx_length)==USBD_OK)remote_phase=0;else ++usb_drops;unlock(key);}
     return;
   }
-  if (now - last_log < 100u) return;
+  if (now - last_log < 100u) {
+    uint16_t period=meter_periods[meter_rate];
+    if(modes.mode==PSU_MODE_VOLTMETER && now-last_meter>=period){
+      uint32_t mv;unsigned valid;
+      key=lock();
+      mv=(uint32_t)(control.vout_raw*1000.0f+0.5f);
+      valid=control.initialized && control.adc_age_ms<3 && control.vout_raw<=control.settings.vout_max;
+      unlock(key);
+      int size=snprintf((char *)tx_buffer,sizeof(tx_buffer),
+        "{\"type\":\"meter\",\"ms\":%lu,\"mV\":%lu,\"period_ms\":%u,\"valid\":%u}\r\n",
+        (unsigned long)now,(unsigned long)mv,period,valid);
+      if(size>0 && (unsigned)size<sizeof(tx_buffer)){
+        key=lock();
+        if(CDC_Transmit_FS(tx_buffer,(uint16_t)size)==USBD_OK)last_meter=now;
+        unlock(key);
+      }
+    }
+    return;
+  }
   last_log = now; PsuApp_Snapshot(&s);
   tx_length = (uint32_t)snprintf((char *)tx_buffer, sizeof(tx_buffer),
     "{\"type\":\"telemetry\",\"protocol\":1,\"enabled\":%u,\"rev\":%lu,\"softstart\":true,\"rx_drops\":%lu,\"ms\":%lu,\"vin_mV\":%ld,\"vout_mV\":%ld,\"iout_mA\":%ld,\"temp_dC\":%ld,\"temp_adc\":%u,\"set_mV\":%ld,\"set_mA\":%ld,\"state\":%u,\"fault\":%lu,\"config\":%lu,\"buck_pm\":%ld,\"boost_ho_pm\":%ld,\"cycles\":%lu,\"drops\":%lu,\"vin_warn\":%u,\"temp_valid\":%u,\"irms_mA\":%ld,\"samples\":%lu,\"bench\":%u,\"imax_mA\":%u,\"ipeak_mA\":%u,\"pmax_W\":%u,\"start_block\":%lu,\"ready_ms\":%u,\"adc_age\":%lu,\"dma_left\":%u,\"adc_src\":\"cont\",\"ilim_mA\":%ld,\"ratio_pm\":%ld,\"cv_pm\":%ld,\"cc_pm\":%ld,\"ref_mV\":%ld,\"drain\":{\"state\":%u,\"pulses\":%lu,\"ticks\":%u},\"trip\":{\"cause\":%lu,\"sample\":%lu,\"vo_adc\":%u,\"io_adc\":%u,\"vi_adc\":%u,\"ovp_adc\":%u}",
@@ -766,7 +862,7 @@ static void usb_poll(uint32_t now) {
     (unsigned)s.control.fault_sample.vin_adc, (unsigned)s.control.fault_sample.ovp_adc);
   if(tx_length>=sizeof(tx_buffer))return;
   int tail=snprintf((char *)tx_buffer+tx_length,sizeof(tx_buffer)-tx_length,
-    ",\"ui_draw_ms\":%lu,\"timing_src\":%lu,\"timing_value\":%lu,\"precharge_hold\":%u,\"ramp_active\":%u,\"ramp_mV_s\":%lu,\"cv_sat\":%u,\"vout_div_pm\":%lu,\"adc\":{\"vo\":%u,\"io\":%u,\"vi\":%u},\"pwm\":{\"arr\":%lu,\"psc\":%lu,\"ccr1\":%lu,\"ccr2\":%lu,\"cr1\":%lu,\"ccmr1\":%lu,\"ccer\":%lu,\"bdtr\":%lu,\"gpio_crh\":%lu,\"afio_mapr\":%lu,\"sd\":%lu},\"mode\":%u,\"time_s\":%lu,\"change\":%lu,\"charge\":{\"chem\":%u,\"cells\":%u,\"phase\":%u,\"reason\":%u,\"set_mA\":%u,\"end_mA\":%u,\"limit_h\":%u,\"tail_ms\":%lu,\"mAh10\":%lu},\"solder\":{\"tip\":%u,\"phase\":%u,\"reason\":%u,\"temp_dC\":%ld,\"target_C\":%u,\"active_C\":%u,\"sleep_C\":%u,\"stand\":%u,\"valid\":%u,\"adc\":%u,\"trip_adc\":%u,\"duty_pm\":%ld,\"ccr1\":%lu,\"heater\":%lu,\"protect\":%u,\"active_low\":0,\"pwm_hz\":10000,\"pin\":\"PB9\",\"timer\":\"TIM4_CH4\",\"block\":%lu,\"cr1\":%lu,\"ccmr1\":%lu,\"ccer\":%lu,\"cycle_ms\":50,\"quiet_ms\":15,\"on_ms\":%u,\"cycle_pos_ms\":%u,\"sample_age_ms\":%lu,\"pin_mode\":%lu,\"rises\":%lu,\"health_now\":%lu,\"health_seen\":%lu,\"stop_flags\":%lu,\"stop_fault\":%lu,\"stop_block\":%lu,\"stop_ms\":%lu,\"pid_demand_pm\":%ld,\"heat_cmd_pm\":%ld,\"pid_dterm_pm\":%ld,\"slew_limited\":%u,\"load_limit_pm\":%u,\"rail_recover\":%u,\"rail_events\":%lu,\"zero_cause\":%u}}\r\n",
+    ",\"ui_draw_ms\":%lu,\"timing_src\":%lu,\"timing_value\":%lu,\"precharge_hold\":%u,\"ramp_active\":%u,\"ramp_mV_s\":%lu,\"cv_sat\":%u,\"vout_div_pm\":%lu,\"adc\":{\"vo\":%u,\"io\":%u,\"vi\":%u},\"pwm\":{\"arr\":%lu,\"psc\":%lu,\"ccr1\":%lu,\"ccr2\":%lu,\"cr1\":%lu,\"ccmr1\":%lu,\"ccer\":%lu,\"bdtr\":%lu,\"gpio_crh\":%lu,\"afio_mapr\":%lu,\"sd\":%lu},\"mode\":%u,\"time_s\":%lu,\"change\":%lu,\"charge\":{\"chem\":%u,\"cells\":%u,\"phase\":%u,\"reason\":%u,\"set_mA\":%u,\"end_mA\":%u,\"limit_h\":%u,\"tail_ms\":%lu,\"mAh10\":%lu,\"start_mV\":%u,\"end_mV\":%u,\"seconds\":%lu},\"solder\":{\"tip\":%u,\"phase\":%u,\"reason\":%u,\"temp_dC\":%ld,\"target_C\":%u,\"active_C\":%u,\"sleep_C\":%u,\"stand\":%u,\"valid\":%u,\"adc\":%u,\"trip_adc\":%u,\"duty_pm\":%ld,\"ccr1\":%lu,\"heater\":%lu,\"protect\":%u,\"active_low\":0,\"pwm_hz\":10000,\"pin\":\"PB9\",\"timer\":\"TIM4_CH4\",\"block\":%lu,\"cr1\":%lu,\"ccmr1\":%lu,\"ccer\":%lu,\"cycle_ms\":50,\"quiet_ms\":15,\"on_ms\":%u,\"cycle_pos_ms\":%u,\"sample_age_ms\":%lu,\"pin_mode\":%lu,\"rises\":%lu,\"health_now\":%lu,\"health_seen\":%lu,\"stop_flags\":%lu,\"stop_fault\":%lu,\"stop_block\":%lu,\"stop_ms\":%lu,\"pid_demand_pm\":%ld,\"heat_cmd_pm\":%ld,\"pid_dterm_pm\":%ld,\"slew_limited\":%u,\"load_limit_pm\":%u,\"rail_recover\":%u,\"rail_events\":%lu,\"zero_cause\":%u}}\r\n",
     (unsigned long)s.max_display_ms,
     (unsigned long)s.timing_sources,(unsigned long)s.timing_value,
     (unsigned)s.control.precharge_hold,
@@ -780,6 +876,7 @@ static void usb_poll(uint32_t now) {
     (unsigned long)s.hardware.ccer,(unsigned long)s.hardware.bdtr,
     (unsigned long)s.hardware.gpio_crh,(unsigned long)s.hardware.afio_mapr,(unsigned long)s.hardware.sd,s.modes.mode,(unsigned long)s.modes.run_seconds,(unsigned long)s.hardware.change,
     s.modes.chemistry,s.modes.cells,s.modes.phase,s.modes.error,s.modes.current_ma,PsuModes_EndMilliamps(&s.modes),s.modes.hours,(unsigned long)s.modes.tail_ms,(unsigned long)s.modes.mah_d10,
+    s.modes.charge_start_mv,s.modes.charge_end_mv,(unsigned long)s.modes.charge_seconds,
     s.modes.solder.tip,s.modes.solder.phase,s.modes.solder.error,(long)(s.modes.solder.temperature*10),
     s.modes.solder.target,s.modes.solder.active_target,s.modes.solder.sleep_target,s.modes.solder.sleeping,s.modes.solder.valid,s.modes.solder.raw,s.modes.solder.trip_adc,
     (long)(s.modes.solder.duty*1000),(unsigned long)s.hardware.heater_ccr,(unsigned long)s.hardware.heater,(unsigned)PSU_SOLDER_TEMP_PROTECTION,(unsigned long)s.hardware.heater_block,(unsigned long)s.hardware.heater_cr1,(unsigned long)s.hardware.heater_ccmr1,(unsigned long)s.hardware.heater_ccer,s.modes.solder.on_ms,s.modes.solder.position,
@@ -841,7 +938,10 @@ void PsuApp_Init(void) {
   TIM4->CCER=TIM_CCER_CC4E;TIM4->EGR=TIM_EGR_UG;
   TIM4->CR1=TIM_CR1_ARPE|TIM_CR1_CEN;
   view.presets[0] = (PsuPreset){5000,1000}; view.presets[1] = (PsuPreset){12000,3000}; view.presets[2] = (PsuPreset){24000,2000};
-  {PsuSettings loaded; if(PsuStorage_LoadAll(view.presets,&loaded)) (void)Psu_ApplySettings(&control,&loaded);}
+  {PsuSettings loaded;uint16_t displays=0;
+    if(PsuStorage_LoadUI(view.presets,&loaded,&displays)) (void)Psu_ApplySettings(&control,&loaded);
+    menu.display=displays&1u;menu.solder_display=(displays>>1)&1u;control.input_nominal_v=(displays>>2)&63u;menu.light_theme=(displays>>8)&1u;
+  }
   /* Keep old CRC-valid presets, but clamp legacy 8..15 A values in RAM.
      Loading never enables output or silently rewrites Flash. */
   clamp_presets();
@@ -878,7 +978,13 @@ static void buzzer_update(uint32_t now){
     target_beep_active=allowed;target_beep_until=now+PSU_SOLDER_TARGET_BEEP_MS;
   }
   if(!allowed || (int32_t)(now-target_beep_until)>=0)target_beep_active=0;
-  uint8_t on=fault?(now%1000u<100u):target_beep_active;
+  static uint8_t full_seen;
+  static uint32_t charge_beep_start;
+  uint8_t full=modes.mode==PSU_MODE_CHARGE && modes.phase==PSU_CH_FULL;
+  if(full && !full_seen)charge_beep_start=now;
+  full_seen=full;
+  uint8_t alarm=(control.fault & ~PSU_F_OCP) || (modes.mode==PSU_MODE_SOLDER && modes.solder.error);
+  uint8_t on=alarm?(now%1000u<100u):target_beep_active || (full && now-charge_beep_start<150u);
   if(PSU_BUZZER_ENABLED)HAL_GPIO_WritePin(GPIOC,GPIO_PIN_14,on==PSU_BUZZER_ACTIVE_HIGH?GPIO_PIN_SET:GPIO_PIN_RESET);
   unlock(key);
 }
@@ -895,14 +1001,14 @@ void PsuApp_Poll(void) {
   static uint32_t last_draw, notice_until;
   foreground_service();
   uint32_t now = HAL_GetTick();
-  if (save_pending && !control.enabled && !(request & 8u) &&
+  if (save_pending && !menu.editing && !PsuModes_Busy(&modes,&control) && !(request & 8u) &&
       discharge.state != PSU_D_WAIT && discharge.state != PSU_D_ACTIVE &&
       (!discharge.fired || now - discharge.last_pulse >= (uint32_t)control.settings.discharge_interval)) {
     /* Stop the actuator ISR before shutdown, so it cannot re-enable healthy
        standby between EmergencyOff and the Flash write. */
     uint32_t key = lock(); HAL_TIM_Base_Stop_IT(&htim3); PsuApp_EmergencyOff(); unlock(key);
     HAL_ADC_Stop_DMA(&hadc1);
-    saved_notice = PsuStorage_SaveAll(view.presets,&control.settings) ? 1 : 2;
+    saved_notice = PsuStorage_SaveUI(view.presets,&control.settings,menu.display|(menu.solder_display<<1)|(control.input_nominal_v<<2)|(menu.light_theme<<8)) ? 1 : 2;
     key = lock(); adc_mean.sequence = adc_consumed = 0; control.adc_age_ms = 10000; control.ready_ms = 0; request &= ~8u; unlock(key);
     if (HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc_dma, sizeof(adc_dma)/sizeof(adc_dma[0])) != HAL_OK || HAL_TIM_Base_Start_IT(&htim3) != HAL_OK) Error_Handler();
     if(remote_phase==3){remote_error=saved_notice==1?0:"flash_failed";remote_phase=2;}

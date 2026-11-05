@@ -1,7 +1,7 @@
 """BB V6 Power Studio. Launch normally or use --demo without a physical board."""
 from __future__ import annotations
 from protocol import THERMAL_FIELDS
-import argparse,csv,json,queue,time,tkinter as tk,sys,traceback,tempfile
+import argparse,csv,json,queue,time,tkinter as tk,sys,traceback,tempfile,math
 from tkinter import ttk,filedialog,messagebox
 from tkinter.scrolledtext import ScrolledText
 from pathlib import Path
@@ -13,6 +13,10 @@ from fault_log import FaultJournal
 
 BG='#0b111c';CARD='#141e2d';PANEL='#101927';TEXT='#e6edf5';MUTED='#8c9eb5'
 CYAN='#51d6dc';GREEN='#67dfa3';AMBER='#ffc77a';RED='#ff7c89';LINE='#29384d'
+PALETTE_KEYS=('BG','CARD','PANEL','TEXT','MUTED','CYAN','GREEN','AMBER','RED','LINE')
+DARK_PALETTE=(BG,CARD,PANEL,TEXT,MUTED,CYAN,GREEN,AMBER,RED,LINE)
+LIGHT_PALETTE=('#ffffff','#f4f7fb','#eef2f7','#182638','#495b72',
+               '#006873','#137747','#855000','#b21d36','#cfd9e5')
 VN=timezone(timedelta(hours=7))
 
 class Studio(tk.Tk):
@@ -24,7 +28,7 @@ class Studio(tk.Tk):
         self.ramp_supported=False;self.solder_supported=False;self.solder_inputs={};self.thermal_inputs={};self.thermal_supported=False
         self.error_journal=FaultJournal();self.fault_rows={};self.fault_sequence=0
         self.pending={};self.on_after_set=False;self.loading=False;self.dirty=False;self.basic_dirty=False
-        self.history=deque(maxlen=1200);self.event_log=deque(maxlen=200);self.csv_file=None;self.csv_writer=None;self.csv_rows=0
+        self.meter_history=deque(maxlen=256);self.meter_period=100;self.meter_hold=None;self.thermal_history=deque(maxlen=1200);self._chart_key=None;self._chart_at=0.;self.history=deque(maxlen=1200);self.event_log=deque(maxlen=200);self.csv_file=None;self.csv_writer=None;self.csv_rows=0
         self.field_vars={};self.last_diag=0;self.port_items={};self.demo_requested=demo
         self._styles();self._header();self._pages();self._footer();self.load_editor(self.settings)
         self.voltage_var.trace_add('write',lambda *_:self._basic_edited());self.current_var.trace_add('write',lambda *_:self._basic_edited())
@@ -36,6 +40,11 @@ class Studio(tk.Tk):
 
     def _styles(self):
         style=ttk.Style(self);style.theme_use('clam')
+        light=BG==LIGHT_PALETTE[0]
+        input_bg='#ffffff' if light else '#0b1422'
+        hover='#dce6f2' if light else '#354961'
+        disabled_bg='#edf1f6' if light else '#182232'
+        selection='#d4edf0' if light else '#234554'
         style.configure('.',background=BG,foreground=TEXT,font=('Segoe UI',10))
         style.configure('TFrame',background=BG);style.configure('Card.TFrame',background=CARD)
         style.configure('TLabel',background=BG,foreground=TEXT)
@@ -43,22 +52,45 @@ class Studio(tk.Tk):
         style.configure('TLabelframe',background=CARD,bordercolor=LINE,relief='solid')
         style.configure('TLabelframe.Label',background=CARD,foreground=CYAN,font=('Segoe UI Semibold',11))
         style.configure('TButton',background=LINE,foreground=TEXT,borderwidth=0,padding=(12,9))
-        style.map('TButton',background=[('active','#354961'),('disabled','#182232')],foreground=[('disabled','#56677c')])
+        style.map('TButton',background=[('active',hover),('disabled',disabled_bg)],foreground=[('disabled','#56677c')])
         style.configure('Accent.TButton',background='#176b73',foreground='#edffff')
         style.map('Accent.TButton',background=[('active','#24828c'),('disabled','#183540')])
         style.configure('Danger.TButton',background='#873b4b',foreground='#fff0f3')
         style.map('Danger.TButton',background=[('active','#a34859'),('disabled','#352331')])
-        style.configure('TEntry',fieldbackground='#0b1422',foreground=TEXT,bordercolor=LINE,padding=5)
-        style.configure('TSpinbox',fieldbackground='#0b1422',foreground=TEXT,arrowcolor=MUTED,bordercolor=LINE,padding=5)
-        style.configure('TCombobox',fieldbackground='#0b1422',background=LINE,foreground=TEXT,arrowcolor=MUTED,padding=5)
-        style.map('TCombobox',fieldbackground=[('readonly','#0b1422')],foreground=[('readonly',TEXT)])
+        style.configure('TEntry',fieldbackground=input_bg,foreground=TEXT,bordercolor=LINE,padding=5)
+        style.configure('TSpinbox',fieldbackground=input_bg,foreground=TEXT,arrowcolor=MUTED,bordercolor=LINE,padding=5)
+        style.configure('TCombobox',fieldbackground=input_bg,background=LINE,foreground=TEXT,arrowcolor=MUTED,padding=5)
+        style.map('TCombobox',fieldbackground=[('readonly',input_bg)],foreground=[('readonly',TEXT)])
         style.configure('TNotebook',background=BG,borderwidth=0)
         style.configure('TNotebook.Tab',background=BG,foreground=MUTED,padding=(22,11))
         style.configure('Treeview',background=PANEL,fieldbackground=PANEL,foreground=TEXT,rowheight=28,borderwidth=0)
         style.configure('Treeview.Heading',background=CARD,foreground=CYAN,font=('Segoe UI Semibold',10))
-        style.map('Treeview',background=[('selected','#234554')])
+        style.map('Treeview',background=[('selected',selection)])
         style.map('TNotebook.Tab',background=[('selected',CARD)],foreground=[('selected',CYAN)])
         self.option_add('*TCombobox*Listbox.background',CARD);self.option_add('*TCombobox*Listbox.foreground',TEXT)
+
+    def toggle_theme(self):
+        light=BG!=LIGHT_PALETTE[0]
+        old=tuple(globals()[name] for name in PALETTE_KEYS)
+        palette=LIGHT_PALETTE if light else DARK_PALETTE
+        colors=dict(zip(old,palette))
+        globals().update(zip(PALETTE_KEYS,palette))
+        widgets=[self]
+        while widgets:
+            widget=widgets.pop()
+            widgets.extend(widget.winfo_children())
+            supported=widget.keys()
+            for option in ('background','foreground','insertbackground','selectbackground',
+                           'selectforeground','highlightbackground','highlightcolor'):
+                if option in supported:
+                    value=str(widget.cget(option))
+                    if value in colors:widget.configure(**{option:colors[value]})
+        self._styles()
+        for tag,color in (('protection',RED),('warning',AMBER),('cleared',GREEN),('complete',GREEN),('app_error',RED)):
+            self.fault_tree.tag_configure(tag,foreground=color)
+        self.theme_button.configure(text='Theme tối' if light else 'Theme sáng')
+        self._chart_key=None
+        self.draw_chart(force=True)
 
     def _header(self):
         top=ttk.Frame(self,padding=(22,17,22,10));top.pack(fill='x')
@@ -72,6 +104,8 @@ class Studio(tk.Tk):
         self.badge=tk.Label(bar,text='● OFFLINE',bg=BG,fg=MUTED,font=('Segoe UI Semibold',10));self.badge.pack(side='left')
         self.device_label=ttk.Label(bar,text='Chọn cổng COM của board để bắt đầu.',style='Muted.TLabel');self.device_label.pack(side='left',padx=18)
         ttk.Button(bar,text='Xem DEMO',command=self.connect_demo).pack(side='right')
+        self.theme_button=ttk.Button(bar,text='Theme tối' if BG==LIGHT_PALETTE[0] else 'Theme sáng',command=self.toggle_theme)
+        self.theme_button.pack(side='right',padx=(0,6))
         self.header_panic=ttk.Button(bar,text='TẮT NGAY · Esc',style='Danger.TButton',command=self.panic)
         self.header_panic.pack(side='right',padx=9)
 
@@ -98,14 +132,20 @@ class Studio(tk.Tk):
             if i==3:self.mode_label=label
         duty=ttk.Frame(left);duty.grid(row=2,column=0,sticky='ew',pady=(0,12));duty.columnconfigure((0,1),weight=1)
         self.buck_duty_var=tk.StringVar(value='—');self.boost_duty_var=tk.StringVar(value='—')
+        self.duty_captions=[]
         for i,(title,var,color) in enumerate((('DUTY BUCK · IN / HO',self.buck_duty_var,CYAN),('DUTY BOOST · IN / HO',self.boost_duty_var,GREEN))):
             card=ttk.Frame(duty,style='Card.TFrame',padding=(12,8));card.grid(row=0,column=i,sticky='ew',padx=(0,6 if i==0 else 0))
-            ttk.Label(card,text=title,background=CARD,foreground=MUTED,font=('Segoe UI',9)).pack(anchor='w')
+            label=ttk.Label(card,text=title,background=CARD,foreground=MUTED,font=('Segoe UI',9));label.pack(anchor='w');self.duty_captions.append(label)
             ttk.Label(card,textvariable=var,background=CARD,foreground=color,font=('Consolas',20)).pack(anchor='w')
         chart=ttk.Frame(left,style='Card.TFrame',padding=14);chart.grid(row=3,column=0,sticky='nsew')
-        ttk.Label(chart,text='XU HƯỚNG · 60 GIÂY',style='Card.TLabel',font=('Segoe UI Semibold',10)).pack(anchor='w')
-        ttk.Label(chart,text='VOUT  ●                         IOUT  ●',background=CARD,foreground=CYAN,font=('Segoe UI',9)).pack(anchor='w',pady=(5,0))
-        self.chart=tk.Canvas(chart,bg=CARD,highlightthickness=0,height=270);self.chart.pack(fill='both',expand=True);self.chart.bind('<Configure>',lambda _:self.draw_chart())
+        self.chart_title=ttk.Label(chart,text='XU HƯỚNG · 60 GIÂY',style='Card.TLabel',font=('Segoe UI Semibold',10));self.chart_title.pack(anchor='w')
+        self.chart_legend=ttk.Label(chart,text='VOUT  ●                         IOUT  ●',background=CARD,foreground=CYAN,font=('Segoe UI',9));self.chart_legend.pack(anchor='w',pady=(5,0))
+        self.chart=tk.Canvas(chart,bg=CARD,highlightthickness=0,height=270);self.chart.pack(fill='both',expand=True);self.chart.bind('<Configure>',lambda _:self.draw_chart(force=True))
+        self.meter_controls=ttk.Frame(chart,style='Card.TFrame')
+        self.meter_hold_button=ttk.Button(self.meter_controls,text='Giữ đồ thị',command=self.toggle_meter_hold,padding=(8,4))
+        self.meter_hold_button.pack(side='left')
+        self.meter_stats=tk.StringVar(value='MIN —   MAX —')
+        ttk.Label(self.meter_controls,textvariable=self.meter_stats,style='Card.TLabel').pack(side='left',padx=9)
         holder=ttk.Frame(self.dashboard,style='Card.TFrame');holder.grid(row=0,column=1,sticky='nsew',pady=(14,5))
         self.control_canvas=tk.Canvas(holder,bg=CARD,highlightthickness=0,width=310,height=300)
         rail=ttk.Scrollbar(holder,orient='vertical',command=self.control_canvas.yview)
@@ -152,10 +192,11 @@ class Studio(tk.Tk):
 
     def _metric(self,parent,column,label,value,unit,color):
         frame=ttk.Frame(parent,style='Card.TFrame',padding=(15,14));frame.grid(row=0,column=column,sticky='nsew',padx=(0,8 if column==0 else 0))
-        ttk.Label(frame,text=label,background=CARD,foreground=MUTED,font=('Segoe UI',9)).pack(anchor='w')
+        caption=ttk.Label(frame,text=label,background=CARD,foreground=MUTED,font=('Segoe UI',9));caption.pack(anchor='w')
         row=ttk.Frame(frame,style='Card.TFrame');row.pack(fill='x',pady=(7,0))
         number=tk.Label(row,text=value,bg=CARD,fg=color,font=('Consolas',34));number.pack(side='left')
-        tk.Label(row,text=unit,bg=CARD,fg=MUTED,font=('Segoe UI',17)).pack(side='left',padx=6,pady=(13,0));return number
+        unit_label=tk.Label(row,text=unit,bg=CARD,fg=MUTED,font=('Segoe UI',17));unit_label.pack(side='left',padx=6,pady=(13,0))
+        number.caption=caption;number.unit_label=unit_label;return number
 
     def _configuration(self):
         top=ttk.Frame(self.config_page,padding=(0,12,0,9));top.pack(fill='x')
@@ -460,20 +501,46 @@ class Studio(tk.Tk):
             self.voltage_var.set(f"{ch.get('cells',1)*(3.65 if ch.get('chem')==1 else 4.2):.2f}")
             if not self.basic_dirty:self.current_var.set(f"{ch.get('set_mA',500)/1000:.2f}")
             self.loading=False
-        self.voltage_readout.configure(text=f"{data['vout_mV']/1000:05.2f}");self.current_readout.configure(text=f"{data['iout_mA']/1000:05.2f}")
+        solder=data.get('mode')==2;meter=data.get('mode')==4;sol=data.get('solder',{})
+        if solder:
+            self.voltage_readout.configure(text=f"{sol.get('temp_dC',0)/10:.1f}" if sol.get('valid') else '—',fg=RED if sol.get('reason') else CYAN)
+            self.current_readout.configure(text=f"{sol.get('active_C',sol.get('target_C',300))}")
+        else:
+            self.voltage_readout.configure(text=f"{data['vout_mV']/1000:05.2f}",fg=CYAN)
+            self.current_readout.configure(text=f"{data['iout_mA']/1000:05.2f}")
+        if not hasattr(self,'_metric_mode') or self._metric_mode!=(solder,meter):
+            self._metric_mode=(solder,meter)
+            self.voltage_readout.caption.configure(text='NHIỆT ĐỘ MŨI' if solder else 'ĐIỆN ÁP ĐO DC' if meter else 'ĐIỆN ÁP OUTPUT')
+            self.current_readout.caption.configure(text='NHIỆT ĐỘ ĐẶT' if solder else 'DÒNG OUTPUT')
+            self.voltage_readout.unit_label.configure(text='°C' if solder else 'V')
+            self.current_readout.unit_label.configure(text='°C' if solder else 'A')
+            self.duty_captions[0].configure(text='DUTY HEATER · LỆNH PID' if solder else 'DUTY BUCK · IN / HO')
+            self.duty_captions[1].configure(text='DÒNG / GIỚI HẠN TAY HÀN' if solder else 'DUTY BOOST · IN / HO')
+            self.chart_title.configure(text='DẠNG SÓNG ĐIỆN ÁP DC' if meter else 'XU HƯỚNG · 60 GIÂY')
+            self.meter_history.clear();self.meter_hold=None
+            self.meter_hold_button.configure(text='Giữ đồ thị')
+            if meter:self.meter_controls.pack(fill='x',before=self.chart,pady=(5,0))
+            else:self.meter_controls.pack_forget()
+            self.chart_legend.configure(text='M1 2 Hz · M2 10 Hz · M3 50 Hz' if meter else 'MŨI  ━                         NHIỆT ĐẶT  ┄' if solder else 'VOUT  ●                         IOUT  ●')
+            self.history.clear();self.thermal_history.clear();self._chart_key=None
+        self.thermal_history.append((self.last_rx,sol.get('temp_dC',0)/10 if sol.get('valid') else None,sol.get('active_C',sol.get('target_C',300))))
         self.vin_var.set(f"VIN  {data['vin_mV']/1000:.2f} V");self.temp_var.set(f"FET  {data['temp_dC']/10:.1f} °C" if data.get('temp_valid') else 'FET  SENSOR ?')
         self.power_var.set(f"{data['vout_mV']*data['iout_mA']/1e6:.2f} W")
         for key,var in (('buck_pm',self.buck_duty_var),('boost_ho_pm',self.boost_duty_var)):
             pm=data.get(key)
             var.set(f'{pm/10:.1f} %' if type(pm) in (int,float) and 0<=pm<=1000 else '—')
+        if solder:
+            self.buck_duty_var.set(f"{sol.get('heat_cmd_pm',sol.get('duty_pm',0))/10:.1f} %")
+            self.boost_duty_var.set(f"{data['iout_mA']/1000:.2f} / {self.settings['solder_current']/1000:g} A")
         drain=data.get('drain',{}).get('state',0);mode='FAULT' if data['fault'] else 'DRAIN' if drain==2 else 'CC' if data['state']==3 else 'RAMP' if data.get('enabled') and data['state']==1 else 'CV' if data.get('enabled') else 'OFF'
         charge=data.get('charge',{})
         if not data['fault'] and data.get('mode')==1:mode='CHG '+{0:'OFF',1:'CHECK',2:'PRE',3:'CC' if data['state']==3 else 'CV',4:'FULL',5:'STOP',6:'ERROR'}.get(charge.get('phase'),'?')
         elif not data['fault'] and data.get('mode')==2:
             sol=data.get('solder',{})
-            mode='SOLDER ERROR' if sol.get('reason') else 'SOLDER STAND' if sol.get('stand') and data.get('enabled') else 'SOLDER HEAT' if sol.get('phase')==3 else 'SOLDER WAIT' if data.get('enabled') else 'SOLDER ON' if data.get('change') else 'SOLDER OFF'
+            mode='SOLDER ERROR' if sol.get('reason') else 'SOLDER OFF' if not data.get('change') else 'SOLDER WAIT' if sol.get('phase')!=3 or sol.get('rail_recover') else 'SOLDER STAND' if sol.get('active_C')==sol.get('sleep_C') and sol.get('stand') else 'SOLDER COOL' if sol.get('temp_dC',0)>sol.get('active_C',300)*10+50 else 'SOLDER READY' if sol.get('valid') and abs(sol.get('temp_dC',0)-sol.get('active_C',300)*10)<=50 else 'SOLDER HEAT'
+        if meter and not data['fault']:mode='VOLTMETER'
         self.mode_var.set(mode);self.applied_var.set(f"Đã áp dụng: {data['set_mV']/1000:.2f} V / {data['set_mA']/1000:.2f} A")
-        self.mode_label.configure(foreground=RED if mode in ('FAULT','CHG ERROR','SOLDER ERROR') else AMBER if mode in ('DRAIN','RAMP','CHG CHECK','CHG PRE','SOLDER WAIT','SOLDER STAND') else GREEN if mode in ('CC','CHG FULL','SOLDER ON','SOLDER HEAT') else CYAN if mode in ('CV','CHG CV','CHG CC') else MUTED)
+        self.mode_label.configure(foreground=RED if mode in ('FAULT','CHG ERROR','SOLDER ERROR') else AMBER if mode in ('DRAIN','RAMP','CHG CHECK','CHG PRE','SOLDER WAIT','SOLDER STAND') else GREEN if mode in ('CC','CHG FULL','SOLDER ON','SOLDER HEAT','SOLDER READY') else CYAN if mode in ('CV','CHG CV','CHG CC') else MUTED)
         sec=data.get('time_s',0);self.run_info_var.set(f'TIME {sec//3600:02d}:{sec//60%60:02d}:{sec%60:02d}'+(f" · {charge.get('mAh10',0)/10:.1f} mAh" if data.get('mode')==1 else ''))
         if type(data.get('ramp_mV_s')) is int:
             self.ramp_status_var.set(f"Ramp tăng áp · {data['ramp_mV_s']/1000:g} V/s"+(' · đang tăng' if data.get('ramp_active') else ''))
@@ -491,6 +558,8 @@ class Studio(tk.Tk):
             adc=f"ADC PA3 {sol['adc']} / 4095" if type(sol.get('adc')) is int else 'ADC PA3 chưa có dữ liệu'
             reading=adc if sol.get('protect')==0 else f"{sol.get('temp_dC',0)/10:.1f}°C" if sol.get('valid') else 'chưa có dữ liệu nhiệt'
             info='Tay hàn dừng: '+SOLDER_REASONS.get(sol['reason'],str(sol['reason'])) if sol.get('reason') else f"{tip} · {reading} · SET {sol.get('active_C',sol.get('target_C',300))}°C · PWM {sol.get('duty_pm',0)/10:.1f}% · {'đang gác' if sol.get('stand') else 'đang dùng'}"
+            if sol.get('valid') and sol.get('protect')!=0:info+=' · '+adc
+            if sol.get('rail_recover'):info+=' · Chờ nguồn hồi phục'
             if sol.get('protect')==0:info+=' · BẢO VỆ NHIỆT MŨI TẮT'
             color=RED if sol.get('reason') else AMBER if sol.get('stand') or sol.get('protect')==0 else GREEN
         elif not data['fault'] and drain>=4:info={4:'Xả dừng: timeout',5:'Xả dừng: điện áp không giảm',6:'Xả dừng: điện áp tăng',7:'Xả đã hủy'}.get(drain,'Xả dừng');color=AMBER
@@ -512,35 +581,81 @@ class Studio(tk.Tk):
             self.last_diag=time.monotonic();self.diag_text.configure(state='normal');self.diag_text.delete('1.0','end')
             self.diag_text.insert('end',json.dumps({k:v for k,v in data.items() if not k.startswith('_')},ensure_ascii=False,indent=2));self.diag_text.configure(state='disabled')
 
-    def draw_chart(self):
-        canvas=self.chart;canvas.delete('all');w=canvas.winfo_width();h=canvas.winfo_height()
-        if w<100 or h<80:return
-        x0,y0,x1,y1=47,20,w-45,h-28;now=time.monotonic()
-        points=[p for p in self.history if now-p[0]<=60]
-        vmax=max(6.,self.latest.get('set_mV',5000)/1000*1.15,max((p[1] for p in points),default=0)*1.1)
-        imax=max(1.2,self.latest.get('set_mA',1000)/1000*1.15,max((p[2] for p in points),default=0)*1.1)
-        for i in range(5):
-            y=y1-(y1-y0)*i/4;canvas.create_line(x0,y,x1,y,fill=LINE)
-            canvas.create_text(x0-8,y,text=f'{vmax*i/4:.1f}',anchor='e',fill=MUTED,font=('Segoe UI',8))
-            canvas.create_text(x1+7,y,text=f'{imax*i/4:.2f}',anchor='w',fill=MUTED,font=('Segoe UI',8))
-        for seconds in (60,45,30,15,0):
-            x=x0+(60-seconds)/60*(x1-x0);canvas.create_text(x,y1+14,text=f'−{seconds}s' if seconds else '0s',fill=MUTED,font=('Segoe UI',8))
-        canvas.create_text(x0,y0-10,text='V',fill=CYAN,font=('Segoe UI',8));canvas.create_text(x1,y0-10,text='A',fill=GREEN,font=('Segoe UI',8))
-        for index,maximum,color in [(1,vmax,CYAN),(2,imax,GREEN)]:
+    def toggle_meter_hold(self):
+        if self.meter_hold is None:
+            if not self.meter_history:return
+            self.meter_hold=(tuple(self.meter_history),self.meter_period)
+        else:self.meter_hold=None
+        self.meter_hold_button.configure(text='Tiếp tục' if self.meter_hold else 'Giữ đồ thị')
+        self.draw_chart(force=True)
+
+    def meter_sample(self,data):
+        if self.latest.get('mode')!=4:return
+        ms,mv,period=(data.get(k) for k in ('ms','mV','period_ms'))
+        if type(ms) is not int or type(mv) is not int or period not in (20,100,500):return
+        if self.meter_period!=period:
+            self.meter_period=period;self.meter_history.clear()
+        self.chart_legend.configure(text=f'{1000//period} Hz đang chọn · M1 2 Hz / M2 10 Hz / M3 50 Hz')
+        self.meter_history.append((ms,mv/1000 if data.get('valid') else None))
+        self.draw_chart()
+
+    def draw_chart(self,force=False):
+        canvas=self.chart;w=canvas.winfo_width();h=canvas.winfo_height();now=time.monotonic()
+        if w<100 or h<80 or not force and now-self._chart_at<.1:return
+        self._chart_at=now
+        solder=self.latest.get('mode')==2;meter=self.latest.get('mode')==4
+        span=60
+        if meter:
+            samples,period=self.meter_hold or (self.meter_history,self.meter_period)
+            span=120*period/1000
+            newest=samples[-1][0] if samples else 0
+            points=[]
+            for stamp,value in samples:
+                age=((newest-stamp)&0xffffffff)/1000
+                if age<=span:points.append((now-age,value,None))
+            values=[point[1] for point in points if point[1] is not None]
+            self.meter_stats.set(f'MIN {min(values):.3f} V   MAX {max(values):.3f} V' if values else 'MIN —   MAX —')
+        else:
+            points=[p for p in (self.thermal_history if solder else self.history) if now-p[0]<=span]
+        x0,y0,x1,y1=47,20,w-45,h-28
+        if solder:
+            vmax=max(100.,math.ceil(max((max(p[1] or 0,p[2]) for p in points),default=450)/50)*50);imax=vmax
+        elif meter:
+            vmax=max(2.,math.ceil(max((p[1] or 0 for p in points),default=0)*1.1/2)*2);imax=1
+        else:
+            vmax=max(6.,math.ceil(max(self.latest.get('set_mV',5000)/1000*1.15,max((p[1] for p in points),default=0)*1.1)/2)*2)
+            imax=max(1.2,math.ceil(max(self.latest.get('set_mA',1000)/1000*1.15,max((p[2] for p in points),default=0)*1.1)*2)/2)
+        key=(w,h,solder,meter,span,vmax,imax)
+        if key!=self._chart_key:
+            canvas.delete('all');self._chart_key=key
+            for i in range(5):
+                y=y1-(y1-y0)*i/4;canvas.create_line(x0,y,x1,y,fill=LINE)
+                canvas.create_text(x0-8,y,text=f'{vmax*i/4:.0f}' if solder else f'{vmax*i/4:.1f}',anchor='e',fill=MUTED,font=('Segoe UI',8))
+                if not solder and not meter:canvas.create_text(x1+7,y,text=f'{imax*i/4:.2f}',anchor='w',fill=MUTED,font=('Segoe UI',8))
+            for seconds in (span,span*.75,span*.5,span*.25,0):
+                x=x0+(span-seconds)/span*(x1-x0);canvas.create_text(x,y1+14,text=f'−{seconds:g}s' if seconds else '0s',fill=MUTED,font=('Segoe UI',8))
+            canvas.create_text(x0,y0-10,text='°C · Mũi / Đặt' if solder else 'V',anchor='w',fill=CYAN,font=('Segoe UI',8))
+            if not solder and not meter:canvas.create_text(x1,y0-10,text='A',fill=GREEN,font=('Segoe UI',8))
+            self._chart_curves=[canvas.create_line(0,0,0,0,fill=color,width=2,dash=(5,3) if solder and index else ()) for index,color in enumerate((CYAN,GREEN))]
+        for index,maximum,item in [(1,vmax,self._chart_curves[0]),(2,imax,self._chart_curves[1])]:
             coords=[]
-            for point in points:coords.extend((x0+max(0,min(1,(point[0]-now+60)/60))*(x1-x0),y1-max(0,min(1,point[index]/maximum))*(y1-y0)))
-            if len(coords)>=4:canvas.create_line(*coords,fill=color,width=2)
+            for point in points:
+                if point[index] is None:coords=[];continue
+                coords.extend((x0+max(0,min(1,(point[0]-now+span)/span))*(x1-x0),y1-max(0,min(1,point[index]/maximum))*(y1-y0)))
+            canvas.itemconfigure(item,state='normal' if len(coords)>=4 else 'hidden')
+            if len(coords)>=4:canvas.coords(item,*coords)
 
     def refresh_controls(self):
         fresh=self.connected and time.monotonic()-self.last_rx<1.5
         operating_mode=self.latest.get('mode',0)
         active=bool(self.latest.get('enabled') or self.latest.get('change') or operating_mode==1 and self.latest.get('charge',{}).get('phase')==1);drain=self.latest.get('drain',{}).get('state',0)
         free=self.ready and fresh and not self.pending;idle=free and not active and drain not in (1,2)
-        self.output_button.configure(text='TẮT OUTPUT' if active else 'BẬT OUTPUT',state='normal' if free and (active or (operating_mode!=2 and not self.latest.get('fault') and self.latest.get('ready_ms',150)>=100)) else 'disabled')
-        self.set_button.configure(state='normal' if free and operating_mode!=2 else 'disabled')
+        self.output_button.configure(text='TẮT OUTPUT' if active else 'BẬT OUTPUT',state='normal' if free and (active or (operating_mode not in (2,4) and not self.latest.get('fault') and self.latest.get('ready_ms',150)>=100)) else 'disabled')
+        self.set_button.configure(state='normal' if free and operating_mode not in (2,4) else 'disabled')
         self.setpoint_entries['V'].configure(state='normal' if operating_mode==0 else 'readonly')
-        self.setpoint_entries['A'].configure(state='disabled' if operating_mode==2 else 'normal')
+        self.setpoint_entries['A'].configure(state='disabled' if operating_mode in (2,4) else 'normal')
         for button in [self.config_button,self.defaults_button,self.save_button]:button.configure(state='normal' if idle and (operating_mode==0 or operating_mode==2 and self.solder_supported) else 'disabled')
+        for button in self.preset_buttons:button.configure(state='disabled' if operating_mode==4 else 'normal')
         for button in self.assign_buttons:button.configure(state='normal' if idle and operating_mode==0 else 'disabled')
         self.read_button.configure(state='normal' if self.connected and not self.pending else 'disabled')
         self.clear_button.configure(state='normal' if free and not active and self.latest.get('fault') and self.latest.get('ready_ms',0)>=100 else 'disabled')
@@ -562,6 +677,7 @@ class Studio(tk.Tk):
                 self.scan_ports()
             elif kind=='reply':self.handle_reply(value)
             elif kind=='telemetry':self.telemetry(value)
+            elif kind=='meter':self.meter_sample(value)
             elif kind=='error':self.pending.clear();self.ready=False;self.on_after_set=False;self.note(value,True)
             elif kind=='notice':self.pending.clear();self.on_after_set=False;self.note(value)
         self.refresh_controls();self.after(50,self.poll)
@@ -646,17 +762,29 @@ def main():
             assert app.mode_var.get()=='CHG ERROR' and app.error_journal.entries[-1]['kind']=='protection'
             sample=dict(sample,mode=2,change=1,ms=sample['ms']+1,charge=dict(sample['charge'],reason=0))
             app.telemetry(sample);app.refresh_controls()
-            assert app.mode_var.get()=='SOLDER ON' and str(app.output_button['state'])=='normal'
+            assert app.mode_var.get()=='SOLDER WAIT' and str(app.output_button['state'])=='normal'
             assert str(app.setpoint_entries['A']['state'])=='disabled' and str(app.set_button['state'])=='disabled'
             sample=dict(sample,change=0,ms=sample['ms']+1);app.telemetry(sample);app.refresh_controls()
             assert app.mode_var.get()=='SOLDER OFF' and str(app.output_button['state'])=='disabled'
             assert str(app.config_button['state'])=='normal' and str(app.save_button['state'])=='normal'
             sample=dict(sample,enabled=1,change=1,ms=sample['ms']+1,solder=dict(tip=1,phase=3,reason=0,temp_dC=2985,adc=1449,protect=0,target_C=300,active_C=300,stand=0,valid=1,duty_pm=200))
-            app.telemetry(sample);assert app.mode_var.get()=='SOLDER HEAT' and '1449' in app.fault_label.cget('text') and 'MŨI TẮT' in app.fault_label.cget('text')
+            app.telemetry(sample);assert app.mode_var.get()=='SOLDER READY' and '1449' in app.fault_label.cget('text') and 'MŨI TẮT' in app.fault_label.cget('text')
             sample=dict(sample,ms=sample['ms']+1,solder=dict(sample['solder'],protect=1))
             app.telemetry(sample);assert '298.5' in app.fault_label.cget('text') and 'MŨI TẮT' not in app.fault_label.cget('text')
             sample=dict(sample,enabled=0,ms=sample['ms']+1,solder=dict(sample['solder'],reason=4,phase=4))
             app.telemetry(sample);assert app.mode_var.get()=='SOLDER ERROR' and app.error_journal.entries[-1]['data']['solder']['reason']==4
+            sample=dict(sample,mode=4,change=0,fault=0,ms=sample['ms']+1)
+            app.telemetry(sample);app.refresh_controls()
+            app.meter_sample(dict(ms=100,mV=12000,period_ms=500,valid=1))
+            app.meter_sample(dict(ms=120,mV=12340,period_ms=20,valid=1))
+            assert list(app.meter_history)==[(120,12.34)] and app.meter_period==20
+            app.toggle_meter_hold()
+            app.meter_sample(dict(ms=140,mV=11980,period_ms=20,valid=1))
+            assert app.meter_hold[0]==((120,12.34),) and len(app.meter_history)==2
+            app.toggle_meter_hold();assert app.meter_hold is None
+            app.toggle_theme();assert str(app.cget('background'))==LIGHT_PALETTE[0]
+            app.toggle_theme();assert str(app.cget('background'))==DARK_PALETTE[0]
+            assert str(app.output_button['state'])=='disabled' and app.mode_var.get()=='VOLTMETER'
             result.update(charger_ui=True,charger_journal=True,solder_ui=True)
             result['ok']=True
             if sys.stdout:print('Tk UI/demo/configuration smoke test: PASS',flush=True)

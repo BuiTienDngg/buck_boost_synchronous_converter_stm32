@@ -39,12 +39,12 @@
 #endif
 #define PSU_SOLDER_C245_LABEL "C245"
 #define PSU_SOLDER_C210_LABEL "C210"
-enum { PSU_MODE_LAB, PSU_MODE_CHARGE, PSU_MODE_SOLDER, PSU_MODE_DUTY };
+enum { PSU_MODE_LAB, PSU_MODE_CHARGE, PSU_MODE_SOLDER, PSU_MODE_DUTY, PSU_MODE_VOLTMETER };
 enum { PSU_CELL_LIION, PSU_CELL_LIFEPO4 };
 enum { PSU_CH_IDLE, PSU_CH_CHECK, PSU_CH_PRE, PSU_CH_CCCV, PSU_CH_FULL, PSU_CH_STOP, PSU_CH_ERROR };
 enum { PSU_CH_OK, PSU_CH_LOW, PSU_CH_HIGH, PSU_CH_HEALTH, PSU_CH_TIMEOUT,
        PSU_CH_PRE_TIMEOUT, PSU_CH_NO_CURRENT, PSU_CH_CONFIG, PSU_CH_SWITCH };
-enum { PSU_TIP_C245, PSU_TIP_C210 };
+enum { PSU_TIP_C245, PSU_TIP_C210, PSU_TIP_GOOT };
 enum { PSU_SOL_OFF, PSU_SOL_ROUTE, PSU_SOL_PRECHARGE, PSU_SOL_RUN, PSU_SOL_ERROR };
 enum { PSU_SOL_OK, PSU_SOL_SENSOR, PSU_SOL_STALE, PSU_SOL_HOT, PSU_SOL_NO_RISE,
        PSU_SOL_RAIL_TIMEOUT, PSU_SOL_HEALTH, PSU_SOL_CONFIG };
@@ -69,6 +69,8 @@ typedef struct {
 } PsuSolder;
 typedef struct {
   uint32_t started_ms, phase_ms, tail_ms, pre_ready_ms, low_ms;
+  uint16_t charge_start_mv,charge_end_mv;
+  uint32_t charge_seconds;
   uint32_t mah_d10, charge_integral, run_seconds, run_fraction, low_output_ms, changed_ms;
   uint16_t current_ma, lab_mv, lab_ma;
   volatile uint16_t ovp_adc;

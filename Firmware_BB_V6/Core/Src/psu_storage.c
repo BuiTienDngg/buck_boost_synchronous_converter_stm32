@@ -8,6 +8,9 @@
 #define V4_MAGIC 0x42503634u
 #define V5_MAGIC 0x42503635u
 #define MAGIC 0x42503636u
+/* Bits 8-16 store UI/input preferences. Accept retired bit 17 from v6.84. in the CRC-covered version word. */
+#define DISPLAY_SHIFT 8u
+#define DISPLAY_MASK (1023u << DISPLAY_SHIFT)
 typedef struct { uint32_t sequence;PsuPreset presets[3];uint32_t crc,commit; } Legacy;
 typedef struct { uint32_t sequence;PsuPreset presets[3];uint32_t version;float settings[36];uint32_t crc,commit; } RecordV2;
 typedef char V2PrefixMatches[(offsetof(PsuSettings,ramp_v_per_s)==36u*sizeof(float))?1:-1];
@@ -46,7 +49,7 @@ static int valid(const Record *r) {
  if(r->crc!=crc32(r,offsetof(Record,crc)) || PsuSettings_Validate(&r->settings) ||
     !presets_valid(r->presets,r->settings.vout_max,r->settings.i_max))return 0;
  if(r->commit==V5_MAGIC && r->version==5)return 5;
- return r->commit==MAGIC && r->version==6?6:0;
+ return r->commit==MAGIC && (r->version & ~DISPLAY_MASK)==6?6:0;
 }
 static const Record *latest(void) {
  const Record *a=(const Record *)SLOT0,*b=(const Record *)SLOT1;
@@ -54,10 +57,12 @@ static const Record *latest(void) {
  if(!valid(b))return a;
  return (int32_t)(b->sequence-a->sequence)>0?b:a;
 }
-int PsuStorage_LoadAll(PsuPreset p[3],PsuSettings *settings) {
+int PsuStorage_LoadUI(PsuPreset p[3],PsuSettings *settings,uint16_t *displays) {
+ if(displays)*displays=0;
  const Record *r=latest();if(!r)return 0;
  memcpy(p,r->presets,sizeof(r->presets));
  int version=valid(r);
+ if(displays && version==6)*displays=(uint16_t)((r->version & DISPLAY_MASK)>>DISPLAY_SHIFT);
  if(version>=5)*settings=r->settings;
  else {
   PsuSettings_Defaults(settings);
@@ -71,13 +76,13 @@ int PsuStorage_LoadAll(PsuPreset p[3],PsuSettings *settings) {
  if(version<6 && settings->ntc_r25==10000.0f)settings->ntc_r25=PSU_NTC_R25_OHM;
  return 1;
 }
-int PsuStorage_SaveAll(const PsuPreset p[3],const PsuSettings *settings) {
+int PsuStorage_SaveUI(const PsuPreset p[3],const PsuSettings *settings,uint16_t displays) {
  const Record *old=latest();Record next;uint32_t error,at,offset;
  FLASH_EraseInitTypeDef erase={0};HAL_StatusTypeDef status;
  if(PsuSettings_Validate(settings) || !presets_valid(p,settings->vout_max,settings->i_max))return 0;
  at=old==(const Record *)SLOT0?SLOT1:SLOT0;
  memset(&next,0xFF,sizeof(next));next.sequence=old?old->sequence+1:1;
- memcpy(next.presets,p,sizeof(next.presets));next.version=6;next.settings=*settings;
+ memcpy(next.presets,p,sizeof(next.presets));next.version=6u|((uint32_t)displays<<DISPLAY_SHIFT);next.settings=*settings;
  next.crc=crc32(&next,offsetof(Record,crc));next.commit=MAGIC;
  if(HAL_FLASH_Unlock()!=HAL_OK)return 0;
  erase.TypeErase=FLASH_TYPEERASE_PAGES;erase.PageAddress=at;erase.NbPages=1;
@@ -87,6 +92,12 @@ int PsuStorage_SaveAll(const PsuPreset p[3],const PsuSettings *settings) {
   status=HAL_FLASH_Program(FLASH_TYPEPROGRAM_HALFWORD,at+offset,word);
  }
  HAL_FLASH_Lock();return status==HAL_OK && valid((const Record *)at);
+}
+int PsuStorage_LoadAll(PsuPreset p[3],PsuSettings *settings){return PsuStorage_LoadUI(p,settings,0);}
+int PsuStorage_SaveAll(const PsuPreset p[3],const PsuSettings *settings){
+ const Record *old=latest();
+ uint16_t displays=old && valid(old)==6?(uint16_t)((old->version & DISPLAY_MASK)>>DISPLAY_SHIFT):0;
+ return PsuStorage_SaveUI(p,settings,displays);
 }
 /* Compatibility API for older callers and journal regression fixtures. */
 int PsuStorage_Load(PsuPreset p[3]){PsuSettings s;return PsuStorage_LoadAll(p,&s);}

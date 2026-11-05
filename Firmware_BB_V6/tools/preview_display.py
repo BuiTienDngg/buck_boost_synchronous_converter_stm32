@@ -14,7 +14,7 @@ elf=BUILD/'display.elf';binary=elf.with_suffix('.bin')
 subprocess.run([gcc,*args,str(ROOT/'Core/Src/psu_display.c'),str(ROOT/'Core/Src/psu_modes.c'),str(ROOT/'Core/Src/psu_control.c'),str(ROOT/'Core/Src/psu_settings.c'),str(ROOT/'tests/display_fixture.c'),'-nostartfiles','--specs=nano.specs','--specs=nosys.specs','-Wl,-e,preview','-Wl,-Ttext=0x10000','-Wl,-Tdata=0x20000000','-Wl,--gc-sections','-lm','-o',str(elf)],check=True)
 symbols={p[2]:int(p[0],16) for l in subprocess.check_output([str(tools/'arm-none-eabi-nm.exe'),str(elf)],text=True).splitlines() if len(p:=l.split())==3 and p[1].lower()!='u'}
 subprocess.run([str(tools/'arm-none-eabi-objcopy.exe'),'-O','binary','--only-section=.text','--only-section=.rodata',str(elf),str(binary)],check=True)
-for scenario,name in enumerate(['normal','fault','locked','blocked','ovp','discharge','discharge_stopped','discharge_done','ramp','digit_voltage','digit_current','digit_moved','output_off','large_values','menu_root','menu_ramp','menu_charge_edit','menu_charge_back','charge_cc','charge_full','charge_error','solder','charge_pre','menu_stop_first','menu_fault','graph_cv','graph_cc','graph_fault','graph_gaps','menu_display','graph_clock_wrap','graph_full_scale','graph_back_to_number','graph_long_gap','graph_off','menu_solder','solder_stand','solder_no_rise','solder_c210','solder_back_lab','solder_adc_wait','menu_solder_target','solder_sensor_invalid','solder_overtemperature','solder_temperature_changed','solder_temperature_static','unchanged','one_digit','solder_duty_update','solder_one_digit','shrinking_field','menu_selection','solder_bar_half','solder_bar_over','solder_bar_zero','solder_limit_changed','solder_preset_350','solder_off','solder_protect','solder_clock_tick']):
+for scenario,name in enumerate(['normal','fault','locked','blocked','ovp','discharge','discharge_stopped','discharge_done','ramp','digit_voltage','digit_current','digit_moved','output_off','large_values','menu_root','menu_ramp','menu_charge_edit','menu_charge_back','charge_cc','charge_full','charge_error','solder','charge_pre','menu_stop_first','menu_fault','graph_cv','graph_cc','graph_fault','graph_gaps','menu_display','graph_clock_wrap','graph_full_scale','graph_back_to_number','graph_long_gap','graph_off','menu_solder','solder_stand','solder_no_rise','solder_c210','solder_back_lab','solder_adc_wait','menu_solder_target','solder_sensor_invalid','solder_overtemperature','solder_temperature_changed','solder_temperature_static','unchanged','one_digit','solder_duty_update','solder_one_digit','shrinking_field','menu_selection','solder_bar_half','solder_bar_over','solder_bar_zero','solder_limit_changed','solder_preset_350','solder_off','solder_protect','solder_clock_tick','solder_graph','voltmeter','lab_light']):
     emu=Uc(UC_ARCH_ARM,UC_MODE_THUMB|UC_MODE_MCLASS);emu.mem_map(0,0x100000);emu.mem_map(0x20000000,0x10000);emu.mem_write(0x10000,binary.read_bytes())
     emu.reg_write(UC_ARM_REG_SP,0x2000FFF0);emu.reg_write(UC_ARM_REG_LR,0x101);emu.reg_write(UC_ARM_REG_R0,scenario)
     screen=Image.new('RGB',(320,240));pixels=screen.load()
@@ -62,8 +62,8 @@ for scenario,name in enumerate(['normal','fault','locked','blocked','ovp','disch
         assert count<=limits[scenario],(name,count,limits[scenario])
         if scenario not in (46,48):assert count>0,(name,'Update missing')
         print('Incremental bytes:',name,count)
-    if scenario in (0,1,2,3,4,5,6,7,8,9,10,11,12,13,18,19,20,22,25,26,27,28,30,31,32,33,34,39,46,47,50):
-        assert all(pixels[x,y]==(0,0,0) for x in range(210,312) for y in range(4,29)), 'Top-right badge not removed'
+    if scenario in (0,1,2,3,4,5,6,7,8,9,10,11,12,13,25,26,27,28,30,31,32,33,34,39,46,47,50):
+        assert any(pixels[x,y]!=(0,0,0) for x in range(260,302) for y in range(10,18)), 'Output status missing in header'
     # Underline indicates the selected decimal column, including a move
     # without any setpoint change. The previous underline must be erased.
     if scenario in (0,9,10,11):
@@ -71,23 +71,22 @@ for scenario,name in enumerate(['normal','fault','locked','blocked','ovp','disch
         expected=((color>>11)*255//31,((color>>5)&63)*255//63,(color&31)*255//31)
         assert pixels[x,161]==expected,'Selected digit underline missing'
         if scenario==11:assert pixels[112,161]!=expected,'Old digit underline not cleared'
-    # OUT belongs on the left; preset M1 belongs on the right.
     rgb=lambda c:((c>>11)*255//31,((c>>5)&63)*255//63,(c&31)*255//31)
-    if scenario<35 and scenario not in (14,15,16,17,21,23,24,29):
-        color=0xF9A6 if scenario in (1,4,27) else 0x07E0 if scenario in (0,8,9,10,11,13,18,21,22,25,26,28,30,31,32,33) else 0x0000
-        assert pixels[8,215]==rgb(color),'OUT status missing on the left'
-        assert pixels[148,215]==rgb(0xF81F),'M1 missing on the right'
+    if scenario<35 and scenario not in (14,15,16,17,18,19,20,21,22,23,24,29):
+        graph=25<=scenario<=34 and scenario!=32
+        assert pixels[8,215]==(0,0,0), 'Old output tab still visible'
+        assert pixels[148,215]==((0,0,0) if graph else rgb(0xF81F)), 'Preset row does not match display mode'
     if 25<=scenario<=34:
         import struct
         assert struct.unpack('<H',emu.mem_read(symbols['graph_count'],2))[0]==121,'Graph ring count/wrap failed'
         if scenario not in (29,32,33):
-            area=[pixels[x,y] for y in range(76,150) for x in range(40,281)]
+            area=[pixels[x,y] for y in range(70,197) for x in range(40,281)]
             assert area.count(rgb(0x07E0))>80 and area.count(rgb(0xF81F))>80,'Both traces must be present'
         if scenario==32:assert pixels[112,161]==rgb(0xF9A6),'NUMBER digit highlight did not return'
         if scenario==33:
             history=struct.unpack('<242H',emu.mem_read(symbols['graph_history'],484))
             assert sum(n==65535 for n in history)>=240,'Missed history must be gaps'
-    if scenario>=52:
+    if 52<=scenario<=59:
         import struct
         count=struct.unpack('<I',emu.mem_read(symbols['preview_bytes'],4))[0]
         if scenario==52:assert count==0,('Static solder screen redrawn',count)
@@ -102,6 +101,15 @@ for scenario,name in enumerate(['normal','fault','locked','blocked','ovp','disch
     if scenario==36:
         assert pixels[220,8]==(0,0,0) and pixels[222,8]==rgb(0xF9A6), 'Sleep header must show 200C, not the normal 300C target'
         assert pixels[114,204]==rgb(0xF81F), 'Normal preset must not be marked active while sleeping'
+    if scenario==60:
+        plot=[pixels[x,y] for y in range(70,197) for x in range(40,281)]
+        assert rgb(0x07E0) in plot and rgb(0xF81F) in plot, 'Missing solder traces'
+    if scenario==61:
+        assert pixels[212,176]==rgb(0x07E0), '50 Hz highlight missing'
+        assert pixels[112,176]!=rgb(0x07E0), 'Old 10 Hz highlight still active'
+    if scenario==62:
+        assert pixels[0,0]==(255,255,255), 'Light background missing'
+        assert pixels[8,215]==(255,255,255), 'Old theme pixels remained'
     screen.resize((960,720),Image.Resampling.NEAREST).save(BUILD/(name+'.png'))
     print('Rendered actual C driver:',name)
 

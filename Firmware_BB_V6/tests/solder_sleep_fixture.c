@@ -40,7 +40,8 @@ int test_main(void){
   CHECK(!m.solder.sleeping && m.solder.active_target==300 && !m.solder.stand_count);
   CHECK(!m.solder.command && !m.solder.duty && !m.solder.ramp_ms);
   steps(14);CHECK(!m.solder.duty);steps(1);
-  CHECK(m.solder.command>0.49f && m.solder.command<=.51f && p.enabled);
+  float wake_duty=p.settings.solder_kp*(m.solder.active_target-m.solder.temperature);
+  CHECK(m.solder.command>wake_duty-.001f && m.solder.command<wake_duty+.001f && p.enabled);
   /* A HIGH between LOW samples cancels their history. */
   setup(1635);m.solder.stand=1;steps(15);CHECK(m.solder.stand_count==1);
   m.solder.stand=0;steps(50);CHECK(!m.solder.stand_count && !m.solder.sleeping);

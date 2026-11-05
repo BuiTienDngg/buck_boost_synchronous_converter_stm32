@@ -66,6 +66,8 @@ class SerialWorker(threading.Thread):
                         if pending and message.get('id')==pending.identifier:
                             self.events.put(('reply',message));pending=None
                         else:self.events.put(('orphan_reply',message))
+                    elif message.get('type')=='meter':
+                        self.events.put(('meter',message))
                     elif 'ms' in message:
                         message['_received']=time.monotonic();self.events.put(('telemetry',message))
                 if pending and time.monotonic()>deadline:

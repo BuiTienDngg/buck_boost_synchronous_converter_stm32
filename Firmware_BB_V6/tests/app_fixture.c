@@ -56,6 +56,12 @@ int PsuStorage_LoadAll(PsuPreset p[3],PsuSettings *cfg){
 #endif
   return PsuStorage_Load(p);
 }
+int PsuStorage_LoadUI(PsuPreset p[3],PsuSettings *cfg,uint16_t *displays){
+  *displays=0;return PsuStorage_LoadAll(p,cfg);
+}
+int PsuStorage_SaveUI(const PsuPreset p[3],const PsuSettings *cfg,uint16_t displays){
+  (void)displays;return PsuStorage_SaveAll(p,cfg);
+}
 int PsuStorage_SaveAll(const PsuPreset p[3],const PsuSettings *cfg){(void)cfg;return PsuStorage_Save(p);}
 uint8_t CDC_Transmit_FS(uint8_t *p,uint16_t n){if(n>=sizeof(last_tx))return USBD_FAIL;memcpy(last_tx,p,n);last_tx[n]=0;return USBD_OK;}
 static void frame(void){for(unsigned k=0;k<24;k+=3){dma[k]=0;dma[k+1]=0;dma[k+2]=1295;}}
@@ -115,6 +121,57 @@ int test_main(void){
   CHECK(s.control.samples>=2536 && s.control.samples<=2540);CHECK(s.control.adc_age_ms<3);
   check_idle();
   CHECK(s.discharge_state==PSU_D_IDLE && !s.discharge_pulses);
+#if !PSU_LOW_SIDE_TEST && PSU_DISCHARGE_ENABLED
+  /* Meter keeps SD enabled with both timer inputs forced low. */
+  run(GPIO_PIN_4,1100);run(0,60);TIM2->CNT-=6*PSU_ENCODER_COUNTS;run(0,10);
+  tap(GPIO_PIN_4);PsuApp_Snapshot(&s);CHECK(s.modes.mode==PSU_MODE_VOLTMETER);
+  vout_code=647;run(0,160);tap(GPIO_PIN_13);tap(GPIO_PIN_4);PsuApp_Snapshot(&s);
+  CHECK(s.modes.mode==PSU_MODE_VOLTMETER && !s.control.enabled && s.control.vout_raw>11.9f);
+  CHECK(s.menu.notice);
+  CHECK((TIM1->BDTR&TIM_BDTR_MOE) && GPIOA->BSRR==SD_Pin && !s.discharge_pulses);
+  CHECK(!TIM1->CCR1 && !TIM1->CCR2 &&
+    (TIM1->CCMR1&(TIM_CCMR1_OC1M|TIM_CCMR1_OC2M))==
+    (TIM_OCMODE_FORCED_INACTIVE|(TIM_OCMODE_FORCED_INACTIVE<<8)));
+  hUsbDeviceFS.dev_state=USBD_STATE_CONFIGURED;hUsbDeviceFS.pClassData=&cdc;
+  tap(GPIO_PIN_7);PsuApp_Snapshot(&s);CHECK(s.meter_period_ms==500);
+  tap(GPIO_PIN_6);PsuApp_Snapshot(&s);CHECK(s.meter_period_ms==100);
+  tap(GPIO_PIN_5);PsuApp_Snapshot(&s);CHECK(s.meter_period_ms==20);
+  unsigned meter_packet=0;
+  for(unsigned n=0;n<120;++n){
+    run(0,1);
+    if(strstr(last_tx,"\"type\":\"meter\"") && strstr(last_tx,"\"period_ms\":20"))
+      meter_packet=1;
+  }
+  CHECK(meter_packet);
+  hUsbDeviceFS.dev_state=0;
+  vout_code=0;run(0,160);tap(GPIO_PIN_4);PsuApp_Snapshot(&s);
+  CHECK(s.modes.mode==PSU_MODE_LAB && !s.control.enabled);
+  /* Set a one-minute timer with the encoder and cross its board-clock deadline. */
+  run(GPIO_PIN_4,1100);run(0,60);TIM2->CNT-=7*PSU_ENCODER_COUNTS;run(0,10);
+  tap(GPIO_PIN_4);tap(GPIO_PIN_4);TIM2->CNT-=PSU_ENCODER_COUNTS;run(0,10);
+  tap(GPIO_PIN_4);PsuApp_Snapshot(&s);CHECK(s.menu.timer_minutes==1);
+  run(GPIO_PIN_4,1100);run(0,60);run(GPIO_PIN_4,1100);run(0,60);
+  tap(GPIO_PIN_13);PsuApp_Snapshot(&s);CHECK(s.control.enabled);
+  now=s.modes.started_ms+59980u;PsuApp_Poll();run(0,10);PsuApp_Snapshot(&s);
+  CHECK(s.control.enabled);
+  run(0,15);PsuApp_Snapshot(&s);CHECK(!s.control.enabled && !s.control.fault);
+  run(GPIO_PIN_4,1100);run(0,60);TIM2->CNT-=7*PSU_ENCODER_COUNTS;run(0,10);
+  tap(GPIO_PIN_4);tap(GPIO_PIN_4);TIM2->CNT+=PSU_ENCODER_COUNTS;run(0,10);
+  tap(GPIO_PIN_4);PsuApp_Snapshot(&s);CHECK(!s.menu.timer_minutes);
+  run(GPIO_PIN_4,1100);run(0,60);run(GPIO_PIN_4,1100);run(0,60);
+#endif
+#if !PSU_LOW_SIDE_TEST && PSU_DISCHARGE_ENABLED
+  /* Loaded LAB OFF lowers the reference while closed-loop PWM stays active. */
+  vout_code=268;run(0,160);tap(GPIO_PIN_13);
+  current_code=64;run(0,60);PsuApp_Snapshot(&s);
+  float reference_before_off=s.control.reference_v;
+  float ratio_before_off=s.control.ratio;
+  run(GPIO_PIN_13,31);PsuApp_Snapshot(&s);
+  CHECK(s.control.enabled && s.control.soft_off && s.control.reference_v<reference_before_off);
+  CHECK(s.control.ratio<=ratio_before_off && TIM1->CCR1>0 && !(TIM1->CR1&TIM_CR1_OPM));
+  current_code=vout_code=0;run(0,160);PsuApp_Snapshot(&s);
+  CHECK(!s.control.enabled && !s.control.soft_off && !s.control.fault);
+#endif
   /* An unused input, even held, cannot arm output. */
   run(GPIO_PIN_12,1100);run(0,60);PsuApp_Snapshot(&s);
   CHECK(!s.control.enabled && s.edit_digit==0 && !s.edit_current);
@@ -135,8 +192,8 @@ int test_main(void){
   ADC1->CR2|=ADC_CR2_CONT;run(0,160);CHECK(TIM1->BDTR&TIM_BDTR_MOE);
   ntc=0;run(0,30);CHECK(!(TIM1->BDTR&TIM_BDTR_MOE));
   ntc=3413;run(0,160);CHECK(TIM1->BDTR&TIM_BDTR_MOE);
-  /* Two consecutive peak samples still latch all-driver shutdown. */
-  frame();dma[10]=2507;HAL_ADC_ConvHalfCpltCallback(&hadc1);
+  /* Five consecutive peak samples still latch all-driver shutdown. */
+  frame();dma[1]=dma[4]=dma[7]=dma[10]=2507;HAL_ADC_ConvHalfCpltCallback(&hadc1);
   PsuApp_Snapshot(&s);CHECK(!s.control.fault);
   dma[13]=2507;HAL_ADC_ConvCpltCallback(&hadc1);PsuApp_Snapshot(&s);
   CHECK(s.control.fault&PSU_F_OCP);CHECK(!(TIM1->BDTR&TIM_BDTR_MOE));
@@ -156,6 +213,18 @@ int test_main(void){
   CHECK((s.discharge_state==PSU_D_IDLE || s.discharge_state==PSU_D_DONE) && !s.discharge_pulses);
   vout_code=268;vin_code=809;run(0,160);tap(GPIO_PIN_13);run(0,160);PsuApp_Snapshot(&s);
   CHECK(s.control.enabled && !s.control.fault);CHECK(!(TIM1->CR1&TIM_CR1_OPM));
+  /* A running LAB downstep keeps continuous CV PWM and never arms a shot. */
+  hUsbDeviceFS.dev_state=USBD_STATE_CONFIGURED;hUsbDeviceFS.pClassData=&cdc;
+  const uint8_t up[]="@101 SET 16000 1000\n",down[]="@102 SET 12000 1000\n",restore[]="@103 SET 5000 1000\n";
+  PsuApp_UsbRx(up,sizeof(up)-1);run(0,60);
+  vout_code=863;run(0,60);
+  PsuApp_UsbRx(down,sizeof(down)-1);run(0,60);PsuApp_Snapshot(&s);
+  CHECK(s.control.enabled && s.control.voltage_set==12 && s.control.reference_v==12);
+  CHECK(!s.control.precharge_hold && s.discharge_state!=PSU_D_ACTIVE && !s.discharge_pulses);
+  CHECK(!(TIM1->CR1&TIM_CR1_OPM) && TIM1->CCR1>0);
+  vout_code=647;run(0,45);PsuApp_Snapshot(&s);
+  CHECK(s.control.enabled && !s.control.precharge_hold);
+  vout_code=268;run(0,60);PsuApp_UsbRx(restore,sizeof(restore)-1);run(0,60);
   tap(GPIO_PIN_13);PsuApp_Snapshot(&s);CHECK(!s.control.enabled);
   CHECK(s.discharge_state==PSU_D_ACTIVE && s.discharge_pulses>0);
   CHECK(TIM1->CR1&TIM_CR1_OPM);CHECK(TIM1->RCR==0);
@@ -201,8 +270,8 @@ int test_main(void){
   /* OFF after real load current must WAIT for healthy settling, not cancel
      or fire immediately. The first shot also waits 20 ms at zero PWM. */
   vout_code=268;run(0,160);tap(GPIO_PIN_13);current_code=100;run(0,10);tap(GPIO_PIN_13);
-  PsuApp_Snapshot(&s);CHECK(s.discharge_state==PSU_D_WAIT && !s.discharge_pulses);
-  CHECK(!(TIM1->BDTR&TIM_BDTR_MOE));current_code=0;run(0,80);
+  PsuApp_Snapshot(&s);CHECK(s.discharge_state==PSU_D_WAIT && !s.control.enabled);
+  current_code=0;run(0,80);
   PsuApp_Snapshot(&s);CHECK(s.discharge_state==PSU_D_WAIT && !s.discharge_pulses);
   run(0,50);PsuApp_Snapshot(&s);CHECK(s.discharge_state==PSU_D_ACTIVE && s.discharge_pulses>0);
   /* A timer that fails to stop in OPM is a latched timing fault. */
@@ -212,7 +281,7 @@ int test_main(void){
   CHECK(!(TIM1->BDTR&TIM_BDTR_MOE));run(0,160);clear_fault_via_usb();
   PsuApp_Snapshot(&s);CHECK(!s.control.fault);check_idle();
   /* Peak protection cancels shots without starting an automatic fault drain. */
-  tap(GPIO_PIN_13);tap(GPIO_PIN_13);frame();dma[10]=2507;HAL_ADC_ConvHalfCpltCallback(&hadc1);
+  tap(GPIO_PIN_13);tap(GPIO_PIN_13);frame();dma[1]=dma[4]=dma[7]=dma[10]=2507;HAL_ADC_ConvHalfCpltCallback(&hadc1);
   dma[13]=2507;HAL_ADC_ConvCpltCallback(&hadc1);PsuApp_Snapshot(&s);
   CHECK(s.control.fault&PSU_F_OCP);CHECK(s.discharge_state==PSU_D_ABORTED);
   CHECK(!(TIM1->BDTR&TIM_BDTR_MOE));CHECK(!(TIM1->CR1&TIM_CR1_OPM));
@@ -290,7 +359,7 @@ int test_main(void){
   /* A single >10A sample does not trip; two consecutive samples straddling
      DMA half/full callbacks do. Uses the actual application callbacks. */
   frame();dma[1]=2507;HAL_ADC_ConvHalfCpltCallback(&hadc1);PsuApp_Snapshot(&s);CHECK(!s.control.fault);
-  frame();dma[10]=2507;HAL_ADC_ConvHalfCpltCallback(&hadc1);PsuApp_Snapshot(&s);CHECK(!s.control.fault);
+  frame();dma[1]=dma[4]=dma[7]=dma[10]=2507;HAL_ADC_ConvHalfCpltCallback(&hadc1);PsuApp_Snapshot(&s);CHECK(!s.control.fault);
   dma[13]=2507;HAL_ADC_ConvCpltCallback(&hadc1);PsuApp_Snapshot(&s);CHECK(s.control.fault&PSU_F_OCP);CHECK(!s.control.enabled);CHECK(!(TIM1->BDTR&TIM_BDTR_MOE));
   run(0,200);tap(GPIO_PIN_13);PsuApp_Snapshot(&s);CHECK(!s.control.enabled);CHECK(s.control.start_block&PSU_B_FAULT);
   clear_fault_via_usb();PsuApp_Snapshot(&s);CHECK(!s.control.fault);CHECK(!s.control.enabled);

@@ -75,7 +75,7 @@ def trace_gate(uc,access,address,size,value,user):
 emu.hook_add(UC_HOOK_MEM_WRITE,trace_gate,begin=timer,end=timer+0x47)
 emu.hook_add(UC_HOOK_MEM_WRITE,trace_gate,begin=gpioa+0x10,end=gpioa+0x17)
 emu.reg_write(UC_ARM_REG_SP,0x2000FFF0);emu.reg_write(UC_ARM_REG_LR,0x101)
-emu.emu_start(symbols['test_main']|1,0x100,count=100_000_000)
+emu.emu_start(symbols['test_main']|1,0x100,count=160_000_000)
 assert emu.reg_read(UC_ARM_REG_PC)==0x100,'Application fixture did not return'
 def u32(s):return struct.unpack('<I',emu.mem_read(symbols[s],4))[0]
 total,failed=u32('test_count'),u32('test_failed')

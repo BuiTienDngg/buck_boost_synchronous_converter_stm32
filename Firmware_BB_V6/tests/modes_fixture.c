@@ -25,6 +25,7 @@ int test_main(void){
   for(unsigned n=0;n<59999;++n)PsuModes_Tick(&m,&p,++now);
   CHECK(m.phase==PSU_CH_CCCV && p.enabled);PsuModes_Tick(&m,&p,++now);
   CHECK(m.phase==PSU_CH_FULL && !p.enabled && m.run_seconds>=60);
+  CHECK(m.charge_start_mv==2800 && m.charge_end_mv==4195 && m.charge_seconds>=60 && m.mah_d10>0);
   uint32_t elapsed=m.run_seconds;
   for(unsigned n=0;n<1000;++n)PsuModes_Tick(&m,&p,++now);
   CHECK(!p.enabled && m.phase==PSU_CH_FULL && m.run_seconds==elapsed);
@@ -44,9 +45,27 @@ int test_main(void){
   p.fault=PSU_F_ADC;PsuModes_Tick(&m,&p,201);CHECK(!m.solder_on && !m.solder_request && m.solder.error==PSU_SOL_HEALTH);
   p.fault=0;PsuModes_Tick(&m,&p,300);CHECK(!m.solder_request);CHECK(PsuModes_Start(&m,&p,301));
   PsuModes_Tick(&m,&p,302);CHECK(!p.enabled && !m.solder.duty);
-  p.vin_raw=5;PsuModes_Tick(&m,&p,304);CHECK(!m.solder_request && !p.enabled);
+  p.vin_raw=5;PsuModes_Tick(&m,&p,304);CHECK((m.solder.health_now&128u) && !p.enabled && !m.solder.duty);
   setup(0);CHECK(PsuModes_Start(&m,&p,200));for(now=200;now<1200;++now)PsuModes_Tick(&m,&p,now);CHECK(m.run_seconds==1);
   PsuModes_Stop(&m,&p);for(now=1200;now<3200;++now)PsuModes_Tick(&m,&p,now);CHECK(m.run_seconds==1);
   CHECK(PsuModes_Start(&m,&p,3200));PsuModes_Tick(&m,&p,3201);CHECK(m.run_seconds==0);
+  setup(0);m.solder.tip=PSU_TIP_GOOT;
+  CHECK(PsuModes_Select(&m,&p,PSU_MODE_SOLDER,100));
+  CHECK(!m.solder_request && !PsuModes_Start(&m,&p,250) && !p.enabled);
+  setup(12);p.input_nominal_v=20;p.settings.input_current_max=2;
+  p.settings.efficiency=0.95f;Psu_Setpoint(&p,12,10);
+  CHECK(Psu_Enable(&p));Psu_Tick1kHz(&p);
+  CHECK(p.current_limit>2.99f && p.current_limit<3.01f);
+  p.vin_raw=17.9f;
+  for(unsigned n=0;n<4;++n){p.adc_age_ms=0;Psu_Tick1kHz(&p);}
+  CHECK(p.enabled && !(p.fault&PSU_F_VIN_UV));
+  p.adc_age_ms=0;Psu_Tick1kHz(&p);CHECK(!p.enabled && (p.fault&PSU_F_VIN_UV));
+  setup(12);CHECK(PsuModes_Select(&m,&p,PSU_MODE_VOLTMETER,100));
+  CHECK(!PsuModes_Start(&m,&p,250) && !p.enabled);
+  CHECK(!PsuModes_Select(&m,&p,PSU_MODE_LAB,260));
+  p.vout_raw=0.1f;p.adc_age_ms=3;
+  CHECK(!PsuModes_Select(&m,&p,PSU_MODE_LAB,270));
+  p.adc_age_ms=0;
+  CHECK(PsuModes_Select(&m,&p,PSU_MODE_LAB,280) && !p.enabled);
   return 0;
 }

@@ -11,6 +11,20 @@ extern SPI_HandleTypeDef hspi1;
 #define CYAN 0xF81Fu
 #define AMBER 0xF9A6u
 #define RED 0xF9A6u
+#define GRID 0x3000u
+static uint8_t light_theme;
+static uint16_t lcd_color(uint16_t color){
+  if(!light_theme)return color;
+  switch(color){
+    case BG:return 0xFFFFu;
+    case GREEN:return 0x03C8u;
+    case CYAN:return 0x7014u;
+    case MUTED:return 0x4A8Bu;
+    case RED:return 0xA107u;
+    case GRID:return 0xD6BBu;
+    default:return color;
+  }
+}
 /* Original compact 5x7 uppercase glyphs, MSB left. */
 static const char alphabet[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ.-:/!?+ >%";
 static const uint8_t glyphs[][7] = {
@@ -63,12 +77,14 @@ static void window(unsigned x, unsigned y, unsigned w, unsigned h) {
 }
 static void rect(unsigned x, unsigned y, unsigned w, unsigned h, uint16_t color) {
   if(!w || !h || x+w>320 || y+h>240)return;
+  color=lcd_color(color);
   unsigned k, bytes=w*h*2; for(k=0;k<sizeof(fill_buffer);k+=2) {fill_buffer[k]=(uint8_t)(color>>8);fill_buffer[k+1]=(uint8_t)color;}
   window(x,y,w,h); while(bytes) {unsigned n=bytes>sizeof(fill_buffer)?sizeof(fill_buffer):bytes;send(fill_buffer,n);bytes-=n;} cs(1);
 }
 static void text_xy(unsigned x, unsigned y, const char *s, unsigned sx,unsigned sy, uint16_t color, uint16_t bg) {
   unsigned n=(unsigned)strlen(s), row, col, k, repeat, width=n*6*sx;
   if (!width || x+width>320 || y+7*sy>240) return;
+  color=lcd_color(color);bg=lcd_color(bg);
   window(x,y,width,7*sy);
   for(row=0;row<7;++row) {
     for(col=0;col<n;++col) {
@@ -105,12 +121,13 @@ static uint16_t solder_bar_width,solder_bar_color;
 #define GRAPH_PERIOD_MS 250u
 #define GRAPH_GAP 65535u
 #define GRAPH_X 40u
-#define GRAPH_Y 76u
+#define GRAPH_Y 70u
 #define GRAPH_W 241u
-#define GRAPH_H 74u
-#define GRID 0x3000u
+#define GRAPH_H 127u
 static uint16_t graph_history[GRAPH_POINTS][2],graph_head,graph_count;
 static uint8_t graph_y[2][GRAPH_POINTS],graph_started,graph_dirty,shown_display;
+enum { DISPLAY_SOLDER_NUMBER=2, DISPLAY_SOLDER_GRAPH, DISPLAY_CHARGER, DISPLAY_VOLTMETER };
+static uint8_t graph_thermal;
 static uint32_t graph_last_ms,graph_vscale,graph_iscale;
 static uint16_t graph_value(float value){
   if(!(value>=0))return GRAPH_GAP;
@@ -123,11 +140,22 @@ static void graph_push(uint16_t volts,uint16_t amps){
 }
 static void graph_sample(const PsuView *v,uint32_t now){
   unsigned steps;
+  uint8_t thermal=v->modes.mode==PSU_MODE_SOLDER;
+  if(thermal!=graph_thermal){
+    graph_thermal=thermal;
+    graph_started=0;
+    graph_head=graph_count=0;
+  }
   if(!graph_started){graph_started=1;graph_last_ms=now;steps=1;}
   else {steps=(now-graph_last_ms)/GRAPH_PERIOD_MS;if(!steps)return;graph_last_ms+=steps*GRAPH_PERIOD_MS;}
   if(steps>GRAPH_POINTS)steps=GRAPH_POINTS;
   while(--steps)graph_push(GRAPH_GAP,GRAPH_GAP);
-  if(v->control.initialized && v->control.adc_age_ms<3)graph_push(graph_value(v->control.vout),graph_value(v->control.current));
+  if(thermal){
+    const PsuSolder *tip=&v->modes.solder;
+    uint16_t actual=tip->valid && now-tip->last_sample_ms<200u &&
+      tip->temperature>=0 && tip->temperature<=500 ? (uint16_t)(tip->temperature*10+0.5f):GRAPH_GAP;
+    graph_push(actual,tip->active_target*10u);
+  }else if(v->control.initialized && v->control.adc_age_ms<3)graph_push(graph_value(v->control.vout),graph_value(v->control.current));
   else graph_push(GRAPH_GAP,GRAPH_GAP);
 }
 static int changed(unsigned slot,const char *s) {
@@ -142,32 +170,49 @@ static void layout(uint8_t display) {
   memset(previous,0,sizeof(previous));fields_reset();
   last_mode=last_chem=last_cells=255;menu_previous[0]=0;
   rect(0,0,320,240,BG);
-  if(display==2){
+  if(display==DISPLAY_VOLTMETER){
+    rect(12,39,296,2,CYAN);
+    rect(12,56,296,87,PANEL);
+    return;
+  }
+  if(display==DISPLAY_CHARGER){
+    rect(12,112,296,1,CYAN);
+    rect(12,207,296,1,CYAN);
+    return;
+  }
+  if(display==DISPLAY_SOLDER_NUMBER){
     text(12,11,"TIP",1,MUTED,BG);text(190,11,"SET",1,MUTED,BG);
     rect(12,28,296,1,RED);
     text(12,116,"IOUT",1,MUTED,BG);
     rect(12,132,296,1,MUTED);rect(12,143,296,1,MUTED);
     rect(12,133,1,10,MUTED);rect(307,133,1,10,MUTED);
-    text(12,161,"TIME",1,MUTED,BG);
     solder_bar_width=0;solder_bar_color=GREEN;
     return;
   }
-  if(display==PSU_DISPLAY_GRAPH){
-    rect(8,34,148,30,PANEL);rect(164,34,148,30,PANEL);
-    text(14,38,"VOUT",1,GREEN,PANEL);text(170,38,"IOUT",1,CYAN,PANEL);
-    text(40,151,"-30S",1,MUTED,BG);text(146,151,"-15S",1,MUTED,BG);text(262,151,"NOW",1,MUTED,BG);
-    text(112,42,"V",2,GREEN,PANEL);text(268,42,"A",2,CYAN,PANEL);
+  if(display==PSU_DISPLAY_GRAPH || display==DISPLAY_SOLDER_GRAPH){
+    uint8_t thermal=display==DISPLAY_SOLDER_GRAPH;
+    rect(8,31,148,32,PANEL);rect(164,31,148,32,PANEL);
+    text(14,43,thermal?"TIP":"VOUT",1,GREEN,PANEL);
+    text(170,43,thermal?"TSET":"IOUT",1,CYAN,PANEL);
+    text(129,43,thermal?"C":"V",1,GREEN,PANEL);
+    text(285,43,thermal?"C":"A",1,CYAN,PANEL);
+    text(40,200,"-30S",1,MUTED,BG);text(146,200,"-15S",1,MUTED,BG);text(262,200,"NOW",1,MUTED,BG);
+    if(!thermal){
+      rect(8,213,148,24,PANEL);rect(164,213,148,24,PANEL);
+      text(14,218,"VSET",1,MUTED,PANEL);text(170,218,"ISET",1,MUTED,PANEL);
+      text(129,218,"V",1,GREEN,PANEL);text(285,218,"A",1,CYAN,PANEL);
+    }
     graph_dirty=1;
-  } else {
+    return;
+  }
   rect(8,36,148,76,PANEL);rect(164,36,148,76,PANEL);
   rect(8,34,148,2,GREEN);rect(164,34,148,2,CYAN);
   text(16,42,"VOLTAGE",2,MUTED,PANEL);text(172,42,"CURRENT",2,MUTED,PANEL);
   text(140,79,"V",2,GREEN,PANEL);text(296,79,"A",2,CYAN,PANEL);
-  }
   for(unsigned current=0;current<2;++current){
-    unsigned x=current?164:8,graph=display==PSU_DISPLAY_GRAPH;uint16_t accent=current?CYAN:GREEN;
-    text(x+8,graph?160:121,current?"SETA":"SETV",1,MUTED,PANEL);
-    text(x+(graph?76:132),graph?160:145,current?"A":"V",1,accent,PANEL);
+    unsigned x=current?164:8;uint16_t accent=current?CYAN:GREEN;
+    text(x+8,121,current?"SETA":"SETV",1,MUTED,PANEL);
+    text(x+132,145,current?"A":"V",1,accent,PANEL);
   }
   text(12,174,"VIN",1,MUTED,BG);text(90,174,"FET TEMP",1,MUTED,BG);text(166,174,"POWER",1,MUTED,BG);text(246,174,"TIME",1,MUTED,BG);
   rect(84,174,1,26,PANEL);rect(160,174,1,26,PANEL);rect(240,174,1,26,PANEL);
@@ -205,38 +250,78 @@ static void set_card(const PsuView *v,unsigned current) {
     static const uint8_t columns[4]={4,3,1,0};mark=columns[v->edit_digit%(current?3u:4u)];
   }
   unsigned graph=v->menu.display==PSU_DISPLAY_GRAPH;
-  unsigned vx=x+(graph?44:8),vy=graph?160:131,scale=graph?1:4;
+  unsigned vx=x+(graph?48:8),vy=graph?216:131,scale=graph?2:4;
   snprintf(key,sizeof(key),"%d",mark);
   if(changed(current?4:3,key)){
     /* The thin editing underline is independent of the numeric glyphs. */
-    rect(x,graph?168:161,148,graph?1:2,BG);
-    if(mark>=0)rect(vx+6*scale*(unsigned)mark,graph?168:161,graph?5:20,graph?1:2,RED);
+    rect(x,graph?234:161,148,graph?1:2,BG);
+    if(mark>=0)rect(vx+6*scale*(unsigned)mark,graph?234:161,graph?10:20,graph?1:2,RED);
   }
   field(2+current,vx,vy,value,scale,scale,accent,PANEL,mark);
 
 }
+static const char *tip_label(unsigned tip){
+  if(tip==PSU_TIP_GOOT)return "GOOT";
+  return tip==PSU_TIP_C210?PSU_SOLDER_C210_LABEL:PSU_SOLDER_C245_LABEL;
+}
+static void gear(unsigned x,unsigned y,uint16_t color){
+  rect(x+3,y+3,14,14,color);
+  rect(x+7,y,6,20,color);rect(x,y+7,20,6,color);
+  rect(x+7,y+7,6,6,BG);
+}
+static void battery_icon(unsigned x,unsigned y,uint16_t color){
+  rect(x,y,20,12,color);rect(x+20,y+4,3,4,color);
+  rect(x+2,y+2,16,8,BG);rect(x+4,y+4,9,4,color);
+}
 static void menu_draw(const PsuView *v){
   char key[128],label[40];const PsuModes *m=&v->modes;const PsuMenu *u=&v->menu;
-  snprintf(key,sizeof(key),"%u/%u/%u/%u/%u/%u/%u/%u/%u/%lu/%u/%lu/%u/%u/%u/%u",u->page,u->selected,u->editing,u->notice,m->mode,m->chemistry,m->cells,m->current_ma,m->hours,(unsigned long)v->control.fault,PsuModes_Busy(m,&v->control),(unsigned long)(v->control.settings.ramp_v_per_s*1000),u->display,m->solder.tip,m->solder.target,m->solder.sleep_target);
+  snprintf(key,sizeof(key),"%u/%u/%u/%u/%u/%u/%u/%u/%u/%lu/%u/%lu/%u/%u/%u/%u/%u/%u/%u",u->page,u->selected,u->editing,u->notice,m->mode,m->chemistry,m->cells,m->current_ma,m->hours,(unsigned long)v->control.fault,PsuModes_Busy(m,&v->control),(unsigned long)(v->control.settings.ramp_v_per_s*1000),u->display|(u->solder_display<<1)|(u->light_theme<<2),m->solder.tip,m->solder.target,m->solder.sleep_target,v->control.input_nominal_v,(unsigned)(v->control.settings.input_current_max*10+0.5f),u->timer_minutes);
   if(!strcmp(key,menu_previous))return;
   strcpy(menu_previous,key);
-  static uint8_t page;
-  if(!menu_visible || page!=u->page){rect(0,0,320,240,BG);fields_reset();page=u->page;}
-  field(21,12,10,u->page==PSU_MENU_ROOT?"MENU":u->page==PSU_MENU_RAMP?"RAMP SPEED":u->page==PSU_MENU_DISPLAY?"DISPLAY MODE":u->page==PSU_MENU_SOLDER?"SOLDER SETUP":"BATTERY CHARGER",2,2,WHITE,BG,-1);
+  static uint8_t page, root_start;
+  if(!menu_visible || page!=u->page){rect(0,0,320,240,BG);fields_reset();page=u->page;root_start=255;
+    if(page==PSU_MENU_CONFIG)gear(280,8,CYAN);
+    if(page==PSU_MENU_CHARGE)battery_icon(280,10,GREEN);
+  }
+  field(21,12,10,u->page==PSU_MENU_ROOT?"MENU":u->page==PSU_MENU_RAMP?"RAMP SPEED":u->page==PSU_MENU_DISPLAY?"DISPLAY MODE":u->page==PSU_MENU_SOLDER?"SOLDER SETUP":u->page==PSU_MENU_CONFIG?"INPUT CONFIG":u->page==PSU_MENU_TIMER?"LAB TIMER":"BATTERY CHARGER",2,2,WHITE,BG,-1);
   const char *notice=v->control.fault?"PROTECT - DETAILS IN APP":u->notice==1?"STOP OUTPUT BEFORE CHANGING":u->notice==2?"END: 10% CURRENT / HOLD 60S":PsuModes_Busy(m,&v->control)?"OUTPUT ACTIVE":"OUTPUT OFF";
   field(12,12,36,notice,1,1,v->control.fault?RED:MUTED,BG,-1);
-  unsigned count=u->page==PSU_MENU_ROOT?7:u->page==PSU_MENU_RAMP?4:u->page==PSU_MENU_DISPLAY?3:u->page==PSU_MENU_SOLDER?5:7,start=u->selected>=6?u->selected-5:0;
+  unsigned count=u->page==PSU_MENU_ROOT?9:u->page==PSU_MENU_RAMP?4:u->page==PSU_MENU_DISPLAY?4:u->page==PSU_MENU_SOLDER?5:u->page==PSU_MENU_CONFIG?3:u->page==PSU_MENU_TIMER?2:7,start=u->selected>=6?u->selected-5:0;
   for(unsigned row=0;row<6 && start+row<count;++row){
     unsigned at=start+row,y=57+25*row;uint16_t bg=at==u->selected?PANEL:BG;
     bg=BG;
-    if(u->page==PSU_MENU_ROOT){static const char *items[]={"RAMP SPEED","BATTERY CHARGER","SOLDER","LAB SUPPLY","DISPLAY","DUTY OPEN LOOP","EXIT"};snprintf(label,sizeof(label),"%s",items[at]);}
+    if(u->page==PSU_MENU_ROOT && start!=root_start){
+      rect(280,y,24,23,BG);
+      if(at==1)battery_icon(280,y+6,GREEN);
+      if(at==5)gear(280,y+2,CYAN);
+      if(at==6)text(282,y+4,"V",2,CYAN,BG);
+    }
+    if(u->page==PSU_MENU_ROOT){static const char *items[]={"RAMP SPEED","BATTERY CHARGER","SOLDER","LAB SUPPLY","DISPLAY","CONFIG","VOLTMETER","LAB TIMER","EXIT"};snprintf(label,sizeof(label),"%s",items[at]);}
     else if(u->page==PSU_MENU_RAMP){static const char *items[]={"FAST     30 V/S","NORMAL   10 V/S","SLOW      2 V/S","BACK"};snprintf(label,sizeof(label),"%s",items[at]);}
-    else if(u->page==PSU_MENU_DISPLAY)snprintf(label,sizeof(label),"%s%s",at==0?"NUMBER":at==1?"GRAPH":"BACK",at<2 && at==u->display?"   ACTIVE":"");
+    else if(u->page==PSU_MENU_DISPLAY){
+      if(at==0)snprintf(label,sizeof(label),"PSU: %s",u->display==PSU_DISPLAY_GRAPH?"GRAPH":"NUMBER");
+      else if(at==1)snprintf(label,sizeof(label),"SOLDER: %s",u->solder_display==PSU_DISPLAY_GRAPH?"GRAPH":"NUMBER");
+      else if(at==2)snprintf(label,sizeof(label),"THEME: %s",u->light_theme?"LIGHT":"DARK");
+      else strcpy(label,"BACK");
+    }
+    else if(u->page==PSU_MENU_TIMER){
+      if(at==1)strcpy(label,"BACK");
+      else if(!u->timer_minutes)strcpy(label,"AUTO OFF: DISABLED");
+      else snprintf(label,sizeof(label),"AUTO OFF: %u MIN",u->timer_minutes);
+    }
+    else if(u->page==PSU_MENU_CONFIG){
+      unsigned da=(unsigned)(v->control.settings.input_current_max*10+0.5f);
+      if(at==0){
+        if(v->control.input_nominal_v)snprintf(label,sizeof(label),"VIN NOMINAL: %uV",v->control.input_nominal_v);
+        else snprintf(label,sizeof(label),"VIN NOMINAL: AUTO");
+      }else if(at==1)snprintf(label,sizeof(label),"INPUT LIMIT: %u.%uA",da/10,da%10);
+      else snprintf(label,sizeof(label),"BACK");
+    }
     else if(u->page==PSU_MENU_SOLDER){
-      if(at==0)snprintf(label,sizeof(label),"TIP: %s",m->solder.tip==PSU_TIP_C210?PSU_SOLDER_C210_LABEL:PSU_SOLDER_C245_LABEL);
+      if(at==0)snprintf(label,sizeof(label),"TIP: %s",tip_label(m->solder.tip));
       else if(at==1)snprintf(label,sizeof(label),"TARGET: %uC",m->solder.target);
       else if(at==2)snprintf(label,sizeof(label),"STAND: %uC",m->solder.sleep_target);
-      else snprintf(label,sizeof(label),"%s",at==3?"START SOLDER":"BACK");
+      else strcpy(label,at==3?"START SOLDER":"BACK");
     }
     else switch(at){
       case 0:snprintf(label,sizeof(label),"TYPE: %s",m->chemistry==PSU_CELL_LIFEPO4?"LIFEPO4 3.65V":"LI-ION 4.20V");break;
@@ -250,7 +335,15 @@ static void menu_draw(const PsuView *v){
     char row_text[48];snprintf(row_text,sizeof(row_text),"%c%s",at==u->selected?'>':' ',label);
     field(13+row,12,y+4,row_text,2,2,at==u->selected?RED:GREEN,bg,-1);
   }
-  field(19,12,214,u->editing?"TURN: EDIT   PRESS: DONE":"TURN: SELECT   PRESS: ENTER",1,1,MUTED,BG,-1);
+  root_start=(uint8_t)start;
+  if(u->page==PSU_MENU_CONFIG){
+    unsigned vin=v->control.input_nominal_v;
+    if(vin){
+      snprintf(label,sizeof(label),"MAX %uW   UV BELOW %u.%uV",(unsigned)(0.9f*vin*v->control.settings.input_current_max),vin*9/10,vin*9%10);
+    }else strcpy(label,"AUTO: BUDGET FOLLOWS MEASURED VIN");
+    field(16,12,159,label,1,1,CYAN,BG,-1);
+  }
+  field(19,12,214,u->page==PSU_MENU_DISPLAY?"TURN: SELECT   PRESS: CHANGE":u->editing?"TURN: EDIT   PRESS: DONE":"TURN: SELECT   PRESS: ENTER",1,1,MUTED,BG,-1);
   field(20,12,229,"ENC HOLD: BACK / EXIT",1,1,MUTED,BG,-1);
 }
 static uint32_t graph_scale(uint32_t value,unsigned current){
@@ -273,7 +366,8 @@ static void graph_draw(const PsuView *v){
     if(graph_history[n][0]!=GRAPH_GAP && graph_history[n][0]>vmax)vmax=graph_history[n][0];
     if(graph_history[n][1]!=GRAPH_GAP && graph_history[n][1]>imax)imax=graph_history[n][1];
   }
-  vmax=graph_scale(vmax,0);imax=graph_scale(imax,1);
+  if(graph_thermal)vmax=imax=5000;
+  else {vmax=graph_scale(vmax,0);imax=graph_scale(imax,1);}
   if(!graph_dirty && vmax==graph_vscale && imax==graph_iscale)return;
   graph_vscale=vmax;graph_iscale=imax;graph_dirty=0;
   unsigned first=GRAPH_POINTS-graph_count;
@@ -283,23 +377,39 @@ static void graph_draw(const PsuView *v){
     graph_y[axis][n]=sample==GRAPH_GAP?255u:(uint8_t)(GRAPH_H-1u-(sample>scale?scale:sample)*(GRAPH_H-1u)/scale);
   }
   char label[12];
-  snprintf(label,sizeof(label),"%luV",(unsigned long)(vmax/1000));field(22,8,73,label,1,1,GREEN,BG,-1);
-  if(imax<1000)snprintf(label,sizeof(label),"0.%luA",(unsigned long)(imax/100));else snprintf(label,sizeof(label),"%luA",(unsigned long)(imax/1000));
-  field(23,284,73,label,1,1,CYAN,BG,-1);text(8,143,"0",1,MUTED,BG);text(284,143,"0",1,MUTED,BG);
+  if(graph_thermal){
+    field(22,8,70,"500C",1,1,MUTED,BG,-1);
+  }else{
+    snprintf(label,sizeof(label),"%luV",(unsigned long)(vmax/1000));
+    field(22,8,70,label,1,1,GREEN,BG,-1);
+    if(imax<1000)snprintf(label,sizeof(label),"0.%luA",(unsigned long)(imax/100));
+    else snprintf(label,sizeof(label),"%luA",(unsigned long)(imax/1000));
+    field(23,284,70,label,1,1,CYAN,BG,-1);
+    field(21,284,188,"0",1,1,MUTED,BG,-1);
+  }
+  field(20,8,188,"0",1,1,MUTED,BG,-1);
+  uint16_t grid=lcd_color(GRID),bg=lcd_color(BG);
+  uint16_t trace1=lcd_color(GREEN),trace2=lcd_color(CYAN);
   window(GRAPH_X,GRAPH_Y,GRAPH_W,GRAPH_H);
   for(unsigned y=0;y<GRAPH_H;++y){
     for(unsigned x=0;x<GRAPH_W;++x){
-      uint16_t color=(x%60u==0 || y==0 || y==GRAPH_H-1u || y==GRAPH_H/2u)?GRID:BG;
-      if(graph_ink(graph_y[0],x,y))color=GREEN;
-      if(graph_ink(graph_y[1],x,y))color=CYAN;
+      uint16_t color=(x%60u==0 || y==0 || y==GRAPH_H-1u || y==GRAPH_H/2u)?grid:bg;
+      if(graph_ink(graph_y[0],x,y))color=trace1;
+      if((!graph_thermal || x%8u<4u) && graph_ink(graph_y[1],x,y))color=trace2;
       line[2*x]=(uint8_t)(color>>8);line[2*x+1]=(uint8_t)color;
     }
     send(line,GRAPH_W*2u);
   }cs(1);
 }
+static void solder_clock(unsigned long seconds,unsigned y){
+  char clock[9];
+  if(seconds>359999u)seconds=359999u;
+  snprintf(clock,sizeof(clock),"%02lu:%02lu:%02lu",seconds/3600u,(seconds/60u)%60u,seconds%60u);
+  field(5,212,y,clock,2,2,GREEN,BG,-1);
+}
 static void solder_draw(const PsuView *v){
   const PsuSolder *s=&v->modes.solder;const PsuControl *p=&v->control;char b[48];
-  field(0,40,8,s->tip==PSU_TIP_C210?PSU_SOLDER_C210_LABEL:PSU_SOLDER_C245_LABEL,2,2,GREEN,BG,-1);
+  field(0,40,8,tip_label(s->tip),2,2,GREEN,BG,-1);
   snprintf(b,sizeof(b),"%uC",s->sleeping?s->sleep_target:s->target);field(2,220,8,b,2,2,RED,BG,-1);
 #if PSU_SOLDER_TEMP_PROTECTION
   int temperature=(int)(s->temperature+0.5f);
@@ -324,16 +434,14 @@ static void solder_draw(const PsuView *v){
   else if(width>solder_bar_width)rect(13+solder_bar_width,133,width-solder_bar_width,10,color);
   else if(width<solder_bar_width)rect(13+width,133,solder_bar_width-width,10,BG);
   solder_bar_width=(uint16_t)width;solder_bar_color=color;
-  unsigned long seconds=v->modes.run_seconds;
-  if(seconds/3600u>99)seconds=359999u;
-  snprintf(b,sizeof(b),"%02lu:%02lu:%02lu",seconds/3600u,(seconds/60u)%60u,seconds%60u);
-  field(5,48,157,b,2,2,GREEN,BG,-1);
+  solder_clock(v->modes.run_seconds,185);
   const char *state=p->fault?"PROTECT":s->error?"ERROR":!v->modes.solder_request?"OFF":
     !s->valid?"NO TIP":s->phase==PSU_SOL_ROUTE?"ROUTING":s->phase==PSU_SOL_PRECHARGE?"RAIL":
-    (v->hardware.heater_block&PSU_HB_TIMER)?"TIMER ERR":s->rail_recover?"BB WAIT":s->sleeping?"SLEEP":s->command>0?"HEATING":"AT TEMP";
-  field(6,192,157,state,2,2,p->fault || s->error?RED:s->sleeping?CYAN:GREEN,BG,-1);
+    (v->hardware.heater_block&PSU_HB_TIMER)?"TIMER ERR":s->rail_recover?"BB WAIT":s->sleeping?"SLEEP":s->temperature>s->active_target+5?"COOLING":
+    s->temperature>=s->active_target-5?"AT TEMP":s->command>0?"HEATING":"PID HOLD";
+  field(6,12,157,state,2,2,p->fault || s->error?RED:s->sleeping?CYAN:GREEN,BG,-1);
   static const char *errors[]={"","TIP SENSOR / CHECK PA3","TIP ADC TIMEOUT","TIP OVER TEMPERATURE","NO TEMPERATURE RISE","SUPPLY NOT READY","CHECK INPUT / FET / ADC","PROFILE OUTSIDE LIMITS"};
-  field(7,12,185,p->fault?"PROTECTED - DETAILS IN APP":errors[s->error<=PSU_SOL_CONFIG?s->error:PSU_SOL_HEALTH],1,1,RED,BG,-1);
+  field(7,12,185,p->fault?"PROTECTED - DETAILS IN APP":s->tip==PSU_TIP_GOOT?"GOOT NEEDS SENSOR PROFILE":errors[s->error<=PSU_SOL_CONFIG?s->error:PSU_SOL_HEALTH],1,1,RED,BG,-1);
   for(unsigned n=0;n<3;++n){
     unsigned x=12+n*102,target=250+n*50;uint16_t color=!s->sleeping && s->target==target?GREEN:CYAN;
     snprintf(b,sizeof(b),"%u/%u",!s->sleeping && s->target==target,n);
@@ -343,29 +451,104 @@ static void solder_draw(const PsuView *v){
     snprintf(b,sizeof(b),"%uC",target);field(8+n,x+22,212,b,2,2,color,BG,-1);
   }
 }
+static void charger_draw(const PsuView *v){
+  const PsuModes *m=&v->modes;
+  const PsuControl *p=&v->control;
+  char b[48],start[12],end[12];
+  static const char *states[]={"READY","CHECKING","PRECHARGE","CHARGING","FULL","STOPPED","CHECK PACK"};
+  const char *status=p->fault&PSU_F_VIN_UV?"VIN LOW":p->fault?"PROTECT":states[m->phase<=PSU_CH_ERROR?m->phase:PSU_CH_ERROR];
+  if(m->phase==PSU_CH_CCCV && !p->fault)status=p->state==PSU_CC?"CHARGE CC":"CHARGE CV";
+  field(0,12,10,"BATTERY CHARGE",2,2,WHITE,BG,-1);
+  snprintf(b,sizeof(b),"%s / %uS / SET %u.%02uA",m->chemistry==PSU_CELL_LIFEPO4?"LIFEPO4":"LI-ION",
+    m->cells,m->current_ma/1000,(m->current_ma%1000)/10);
+  field(1,12,36,b,1,1,CYAN,BG,-1);
+  number(b,sizeof(b),p->vout);field(2,12,57,b,3,3,GREEN,BG,-1);
+  field(3,105,66,"V",2,2,GREEN,BG,-1);
+  number(b,sizeof(b),p->current);field(4,168,57,b,3,3,CYAN,BG,-1);
+  field(5,261,66,"A",2,2,CYAN,BG,-1);
+  field(6,12,91,status,2,2,p->fault || m->phase==PSU_CH_ERROR?RED:GREEN,BG,-1);
+  number(start,sizeof(start),m->charge_start_mv*0.001f);
+  number(end,sizeof(end),m->charge_end_mv*0.001f);
+  snprintf(b,sizeof(b),"START %sV  END %sV",m->charge_start_mv?start:"--.--",m->charge_end_mv?end:"--.--");
+  field(7,12,126,b,2,2,MUTED,BG,-1);
+  unsigned long sec=m->charge_seconds;
+  snprintf(b,sizeof(b),"TIME %02lu:%02lu:%02lu",sec/3600u,sec/60u%60u,sec%60u);
+  field(8,12,151,b,2,2,CYAN,BG,-1);
+  snprintf(b,sizeof(b),"IN %lu.%lu MAH",(unsigned long)m->mah_d10/10,(unsigned long)m->mah_d10%10);
+  field(9,12,177,b,3,3,GREEN,BG,-1);
+  field(10,12,221,m->phase==PSU_CH_FULL?"PRESS ENC TO EXIT":"BT1 START / STOP   HOLD ENC FOR MENU",1,1,MUTED,BG,-1);
+}
 void PsuDisplay_Update(const PsuView *v) {
   const PsuControl *p=&v->control;char s[48];
+  if(light_theme!=v->menu.light_theme){
+    light_theme=v->menu.light_theme;
+    shown_display=255;menu_visible=0;menu_previous[0]=0;
+  }
   graph_sample(v,HAL_GetTick());
   if(v->menu.page){menu_draw(v);menu_visible=1;return;}
-  uint8_t display=v->modes.mode==PSU_MODE_SOLDER?2:v->menu.display;
+  uint8_t display=v->menu.display;
+  if(v->modes.mode==PSU_MODE_CHARGE)display=DISPLAY_CHARGER;
+  if(v->modes.mode==PSU_MODE_VOLTMETER)display=DISPLAY_VOLTMETER;
+  if(v->modes.mode==PSU_MODE_SOLDER)
+    display=v->menu.solder_display==PSU_DISPLAY_GRAPH?DISPLAY_SOLDER_GRAPH:DISPLAY_SOLDER_NUMBER;
   if(menu_visible || shown_display!=display){shown_display=display;layout(shown_display);menu_visible=0;}
-  if(v->modes.mode==PSU_MODE_SOLDER){solder_draw(v);return;}
+  if(display==DISPLAY_VOLTMETER){
+    uint8_t fresh=p->initialized && p->adc_age_ms<3;
+    uint8_t over=p->vout_raw>p->settings.vout_max;
+    field(0,12,10,"DC VOLTMETER",2,2,WHITE,BG,-1);
+    if(fresh && !over)number(s,sizeof(s),p->vout);else strcpy(s,"--.--");
+    field(1,34,72,s,7,7,over?RED:GREEN,PANEL,-1);
+    field(2,260,94,"V",3,3,CYAN,PANEL,-1);
+    static const uint16_t periods[]={500,100,20};
+    static const char *labels[]={"2HZ","10HZ","50HZ"};
+    for(unsigned i=0;i<3;++i){
+      unsigned x=12+100*i;
+      uint8_t selected=v->meter_period_ms==periods[i];
+      uint16_t fill=selected?GREEN:PANEL;
+      if(changed(i,selected?"ON":"OFF"))rect(x,176,96,38,fill);
+      field(3+i,x+(i?24:30),188,labels[i],2,2,selected?BG:MUTED,fill,-1);
+    }
+    const char *hint="";
+    if(v->menu.notice)
+      hint=!fresh?"WAIT FOR ADC":p->vout_raw>0.5f?"DISCONNECT VOUT TO EXIT":"PRESS ENC TO EXIT";
+    field(6,12,224,hint,1,1,p->vout_raw>0.5f?RED:MUTED,BG,-1);
+    return;
+  }
+  if(display==DISPLAY_CHARGER){charger_draw(v);return;}
+  if(display==DISPLAY_SOLDER_NUMBER){solder_draw(v);return;}
+  if(display==DISPLAY_SOLDER_GRAPH){
+    const PsuSolder *tip=&v->modes.solder;
+    field(10,10,9,tip->tip==PSU_TIP_GOOT?"SOLDER GOOT":tip->tip==PSU_TIP_C210?"SOLDER C210":"SOLDER C245",2,2,WHITE,BG,-1);
+    if(tip->valid)snprintf(s,sizeof(s),"%d",(int)(tip->temperature+0.5f));else strcpy(s,"---");
+    field(0,58,36,s,3,3,GREEN,PANEL,-1);
+    snprintf(s,sizeof(s),"%u",tip->active_target);
+    field(1,214,36,s,3,3,CYAN,PANEL,-1);
+    graph_draw(v);
+    const char *status=p->fault || tip->error?"PROTECT":!v->modes.solder_request?"OFF":
+      tip->rail_recover || tip->phase!=PSU_SOL_RUN?"WAIT":tip->sleeping?"SLEEP":
+      !tip->valid?"NO TIP":tip->temperature>tip->active_target+5?"COOLING":
+      tip->temperature>=tip->active_target-5?"AT TEMP":tip->command>0?"HEATING":"PID HOLD";
+    field(8,12,217,status,2,2,p->fault || tip->error?RED:GREEN,BG,-1);
+    solder_clock(v->modes.run_seconds,217);
+    return;
+  }
   const PsuModes *m=&v->modes;
   if(last_mode!=m->mode || last_chem!=m->chemistry || last_cells!=m->cells){
-    last_mode=m->mode;last_chem=m->chemistry;last_cells=m->cells;rect(8,4,194,26,BG);
+    last_mode=m->mode;last_chem=m->chemistry;last_cells=m->cells;rect(8,4,display==PSU_DISPLAY_GRAPH?150:194,26,BG);
     if(m->mode==PSU_MODE_CHARGE)snprintf(s,sizeof(s),"%s %uS",m->chemistry==PSU_CELL_LIFEPO4?"LIFEPO4":"LI-ION",m->cells);
     else snprintf(s,sizeof(s),"%s",m->mode==PSU_MODE_DUTY?"DUTY OPEN LOOP":m->mode==PSU_MODE_SOLDER?"SOLDER":"LAB SUPPLY");
     text(10,10,s,2,WHITE,BG);
   }
   if(v->menu.display==PSU_DISPLAY_GRAPH){
-    number(s,sizeof(s),p->vout);if(changed(0,s)){field(0,50,42,s,2,2,GREEN,PANEL,-1);}
-    number(s,sizeof(s),p->current);if(changed(1,s)){field(1,206,42,s,2,2,CYAN,PANEL,-1);}
+    number(s,sizeof(s),p->vout);if(changed(0,s)){field(0,38,36,s,3,3,GREEN,PANEL,-1);}
+    number(s,sizeof(s),p->current);if(changed(1,s)){field(1,194,36,s,3,3,CYAN,PANEL,-1);}
     graph_draw(v);
   }else{
     number(s,sizeof(s),p->vout);if(changed(0,s))field(0,16,65,s,4,4,GREEN,PANEL,-1);
     number(s,sizeof(s),p->current);if(changed(1,s))field(1,172,65,s,4,4,CYAN,PANEL,-1);
   }
   set_card(v,0);set_card(v,1);
+  if(display!=PSU_DISPLAY_GRAPH){
   unsigned vin=(unsigned)(p->vin>0?p->vin*10+0.5f:0);
   unsigned power=(unsigned)(p->vout>0 && p->current>0?p->vout*p->current*10+0.5f:0);
   int temp=(int)p->temp_c;
@@ -377,29 +560,37 @@ void PsuDisplay_Update(const PsuView *v) {
   unsigned long hours=m->run_seconds/3600u;
   if(hours>99)snprintf(s,sizeof(s),"%luH",hours);else snprintf(s,sizeof(s),"%02lu:%02lu:%02lu",hours,(unsigned long)(m->run_seconds/60u)%60u,(unsigned long)m->run_seconds%60u);
   field(7,246,185,s,1,2,GREEN,BG,-1);
-  if(p->fault)snprintf(s,sizeof(s),"PROTECTED - DETAILS IN APP");
+  if(p->fault)snprintf(s,sizeof(s),p->fault&PSU_F_VIN_UV?"VIN LOW - CHECK INPUT":"PROTECTED - DETAILS IN APP");
   else if(p->config_errors || p->start_block)snprintf(s,sizeof(s),"OUTPUT OFF - CHECK APP");
-  else if(v->discharge_state==PSU_D_ACTIVE)snprintf(s,sizeof(s),"OUTPUT OFF / DISCHARGING");
+  else if(v->discharge_state==PSU_D_ACTIVE)snprintf(s,sizeof(s),p->enabled?"LOWERING VOUT":"OUTPUT OFF / DISCHARGING");
   else if(v->discharge_state>=PSU_D_TIMEOUT)snprintf(s,sizeof(s),"OUTPUT OFF - CHECK APP");
   else if(m->mode==PSU_MODE_CHARGE && m->error){static const char *errors[]={"","NO BATTERY / VOLTAGE LOW","BATTERY VOLTAGE TOO HIGH","CHECK SENSORS / INPUT / BMS","CHARGE TIMEOUT","PRECHARGE TIMEOUT","NO CHARGE CURRENT","PROFILE OUTSIDE LIMITS","WAIT FOR OUTPUT SWITCH"};snprintf(s,sizeof(s),"%s",errors[m->error<=PSU_CH_SWITCH?m->error:PSU_CH_HEALTH]);}
   else if(m->mode==PSU_MODE_CHARGE){snprintf(s,sizeof(s),"%s",m->phase==PSU_CH_FULL?"CHARGE COMPLETE":m->phase==PSU_CH_CHECK?"CHECKING BATTERY":m->phase==PSU_CH_PRE?"PRECHARGE / LIMITED CURRENT":m->phase==PSU_CH_CCCV?"CC/CV / AUTO STOP WHEN FULL":"BMS PACK - SELECT TYPE / CELLS");}
   else if(m->mode==PSU_MODE_DUTY)snprintf(s,sizeof(s),"BUCK %u.%u%% BOOST %s VIN %ld.%ldV",p->manual_duty_pm/10,p->manual_duty_pm%10,p->manual_duty_pm?"90%":"0%",(long)(p->vin*10)/10,(long)(p->vin*10)%10);
   else if(m->mode==PSU_MODE_SOLDER)snprintf(s,sizeof(s),"DC-DC OFF / PC15 %s",m->solder_on?"ON":"OFF");
+  else if(p->soft_off)snprintf(s,sizeof(s),"RAMP OFF");
   else if(v->saved_notice)snprintf(s,sizeof(s),v->saved_notice==1?"SAVED":"SAVE FAILED - CHECK APP");
   else if(p->vin_warning)snprintf(s,sizeof(s),"INPUT LOW");
   else if(p->temp_c>p->settings.temp_warn)snprintf(s,sizeof(s),"FET WARM");
   else s[0]=0;
   field(8,12,203,s,1,1,p->fault?RED:MUTED,BG,-1);
+  }else{
+    field(8,164,12,p->fault&PSU_F_VIN_UV?"VIN LOW":p->fault?"PROTECT":v->discharge_state==PSU_D_ACTIVE?"DRAIN":p->enabled?(p->soft_off?"RAMP OFF":p->state==PSU_CC?"CC":p->state==PSU_RAMP?"RAMP":"CV"):"OFF",1,1,p->fault?RED:MUTED,BG,-1);
+  }
+  uint8_t active=p->enabled || m->phase==PSU_CH_CHECK;
+  field(9,260,10,p->fault?"RESET":active?"OUT ON":"OUT OFF",1,1,
+    p->fault?RED:active?GREEN:MUTED,BG,-1);
+  s[0]=0;
+  if(m->mode==PSU_MODE_LAB && p->enabled && v->menu.timer_minutes){
+    unsigned total=60u*v->menu.timer_minutes;
+    unsigned left=m->run_seconds<total?total-m->run_seconds:0;
+    snprintf(s,sizeof(s),"%u:%02u",left/60u,left%60u);
+  }
+  field(11,216,10,s,1,1,CYAN,BG,-1);
+  if(display==PSU_DISPLAY_GRAPH)return;
   snprintf(s,sizeof(s),"%u/%u/%u",v->selected_preset,p->enabled,m->mode);
   if(changed(7,s))for(unsigned k=0;k<3;++k){
     unsigned x=148+k*56;rect(x,215,52,23,PANEL);if(k==v->selected_preset)rect(x,215,52,2,CYAN);
     char label[4];snprintf(label,sizeof(label),"M%u",k+1);text(x+20,223,label,1,p->enabled || m->mode!=PSU_MODE_LAB?MUTED:WHITE,PANEL);
-  }
-  uint8_t active=p->enabled || m->solder_on || m->phase==PSU_CH_CHECK;
-  snprintf(s,sizeof(s),"%u/%lu/%u",active,(unsigned long)p->fault,m->phase);
-  if(changed(8,s)) {
-    uint16_t fill=p->fault?RED:active?GREEN:PANEL,ink=active || p->fault?BG:WHITE;
-    rect(8,215,132,23,fill);
-    text(p->fault?59:active?56:53,223,p->fault?"RESET":active?"OUT ON":"OUT OFF",1,ink,fill);
   }
 }

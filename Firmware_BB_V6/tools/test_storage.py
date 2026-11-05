@@ -16,14 +16,16 @@ subprocess.run([gcc,*args,str(ROOT/'Core/Src/psu_storage.c'),str(ROOT/'Core/Src/
 symbols={p[2]:int(p[0],16) for l in subprocess.check_output([str(tools/'arm-none-eabi-nm.exe'),str(elf)],text=True).splitlines() if len(p:=l.split())==3 and p[1].lower()!='u'}
 subprocess.run([str(tools/'arm-none-eabi-objcopy.exe'),'-O','binary','--only-section=.text','--only-section=.rodata',str(elf),str(binary)],check=True)
 code=binary.read_bytes();A=struct.pack('<6H',5000,1000,12000,3000,24000,2000);B=struct.pack('<6H',6000,1500,13000,3500,25000,2500)
-def run(function,presets,flash=None,cut=None,settings=None):
+def run(function,presets,flash=None,cut=None,settings=None,displays=0):
     emu=Uc(UC_ARCH_ARM,UC_MODE_THUMB|UC_MODE_MCLASS);emu.mem_map(0,0x100000);emu.mem_map(0x20000000,0x10000);emu.mem_map(0x08000000,0x10000)
     emu.mem_write(0x10000,code);emu.mem_write(0x08000000,b'\xFF'*0x10000);emu.mem_write(0x20000100,presets)
     if flash:emu.mem_write(0x0800F800,flash)
     emu.reg_write(UC_ARM_REG_SP,0x2000FFF0);emu.reg_write(UC_ARM_REG_LR,0x101);emu.reg_write(UC_ARM_REG_R0,0x20000100)
-    if function.endswith('All'):
+    if function.endswith(('All','UI')):
         emu.reg_write(UC_ARM_REG_R1,0x20001000)
         emu.mem_write(0x20001000,settings or bytes(settings_bytes))
+    if function.endswith('UI'):
+        emu.reg_write(UC_ARM_REG_R2,0x20002000 if function=='PsuStorage_LoadUI' else displays)
     operations=[]
     def hook(uc,address,size,user):
         if address==(symbols['HAL_FLASHEx_Erase']&~1):
@@ -45,6 +47,8 @@ def run(function,presets,flash=None,cut=None,settings=None):
     emu.emu_start(symbols[function]|1,0x100,count=2_000_000)
     assert emu.reg_read(UC_ARM_REG_PC)==0x100 or len(operations)==cut
     result=(emu.reg_read(UC_ARM_REG_R0),bytes(emu.mem_read(0x20000100,12)),bytes(emu.mem_read(0x0800F800,2048)),len(operations))
+    if function=='PsuStorage_LoadUI':
+        return result+(int.from_bytes(emu.mem_read(0x20002000,2),'little'),)
     return result+(bytes(emu.mem_read(0x20001000,settings_bytes)),) if function.endswith('All') else result
 passed=0
 def check(condition):
@@ -189,3 +193,13 @@ explicit=run('PsuStorage_SaveAll',A,settings=pack_settings(legacy50))
 check(run('PsuStorage_LoadAll',bytes(12),explicit[2])[4]==pack_settings(legacy50))
 print(f'Flash journal: {passed}/{passed} checks passed (power loss at every erase/program boundary).')
 (BUILD/'storage_results.json').write_text(json.dumps({'passed':passed,'total':passed},indent=2))
+
+for displays in (*range(4),0x100|(24<<2)|1):
+    ui=run('PsuStorage_SaveUI',A,first,settings=factory,displays=displays)
+    check(ui[0]==1)
+    check(run('PsuStorage_LoadUI',bytes(12),ui[2])[4]==displays)
+    saved_again=run('PsuStorage_SaveAll',B,ui[2],settings=factory)
+    check(run('PsuStorage_LoadUI',bytes(12),saved_again[2])[4]==displays)
+    interrupted=run('PsuStorage_SaveUI',B,ui[2],cut=ui[3],settings=factory,displays=displays^3)
+    check(run('PsuStorage_LoadUI',bytes(12),interrupted[2])[4]==displays)
+print('Independent display preferences and interrupted save: PASS')

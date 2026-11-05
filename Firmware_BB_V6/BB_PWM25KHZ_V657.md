@@ -1,0 +1,4 @@
+# BBV6.57 - 25 kHz BB carrier
+Based on restored v6.49. Source TIM1 clock 72 MHz, PSC=0, ARR=2879 gives 25 kHz / 40 us. Existing two-region ratio mapping remains 90% (buck 0.9*R / boost HO 0.9 below R=1; buck 0.9 / boost HO 0.9/R above). At 90% the commanded OFF interval is 4 us. Source OPM discharge retains its 2..20 us pulse width because timer ticks remain 72 MHz; its one-shot period is 40 us.
+Heater TIM4_CH4 remains 10 kHz, with independent 7199 period, existing PID settings, 50 ms frame / 15 ms quiet. PID TIM3 remains 1 kHz. Display is the restored large-display firmware; no ST7735 test or LCD recovery added.
+Tests: application and OPM 110/110; USB 115/115; DUTY 20/20; thermal config 17/17; hold mode 11/11. Keil build passed. Not flashed or physically verified. Flash settings and PID gains unchanged.

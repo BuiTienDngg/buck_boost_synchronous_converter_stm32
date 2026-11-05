@@ -1,0 +1,34 @@
+{
+  "solder_pwm": {
+    "passed": 80,
+    "total": 80,
+    "failed_lines": [],
+    "quiet_adc_checks": 6688
+  },
+  "solder_pwm_normal": {
+    "passed": 80,
+    "total": 80,
+    "failed_lines": [],
+    "quiet_adc_checks": 6688
+  },
+  "foreground": {
+    "passed": 11,
+    "total": 11,
+    "failed_lines": [],
+    "quiet_adc_checks": 0,
+    "simulated_metrics": {
+      "max_draw_ms": 785,
+      "usb_off_ms": 2,
+      "button_off_ms": 27
+    }
+  },
+  "lcd_bus": {
+    "passed": 5,
+    "total": 5,
+    "failed_lines": [],
+    "quiet_adc_checks": 0
+  },
+  "spi_initializer_unchanged": true,
+  "programmed_verified": true,
+  "live_validation": "User confirmed working on 2026-10-22: software SPI, run power, run solder."
+}
